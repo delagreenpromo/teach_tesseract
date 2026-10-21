@@ -4,8 +4,9 @@ import uuid
 from typing import Optional, List, Callable
 from ocr_processor import OCRProcessor
 
+
 class APIClient:
-    def __init__(self, username, password, ocr_processor=None, debug:bool=False, is_production:bool=True):
+    def __init__(self, username, password, ocr_processor=None, debug: bool = False, is_production: bool = True):
         self.username = username
         self.password = password
         self.token = None
@@ -29,7 +30,6 @@ class APIClient:
                 "accessLevelID": 0
             }
             logger.info(f"Аутентификация на {authenticate_url}")
-            #response = self.session.post(self.authenticate_url, json=payload)
             response = self.session.post(authenticate_url, json=payload)
             response.raise_for_status()
             data = response.json()
@@ -46,10 +46,7 @@ class APIClient:
             return False
 
     def _request_with_reauth(self, method, url, **kwargs):
-        """
-        Выполняет HTTP-запрос, в случае 401 пытается переавторизоваться и повторить.
-        Возвращает response.
-        """
+        """HTTP-запрос с авто-реавторизацией при 401."""
         try:
             response = method(url, **kwargs)
             response.raise_for_status()
@@ -143,14 +140,8 @@ class APIClient:
         try:
             send_url = send_url_template.format(obj_id=obj_id)
             payload = [
-                {
-                    "attributeID": first_attribute_id,
-                    "values": ["true"]
-                },
-                {
-                    "attributeID": last_attribute_id,
-                    "values": text
-                }
+                {"attributeID": first_attribute_id, "values": ["true"]},
+                {"attributeID": last_attribute_id, "values": text}
             ]
             logger.info(f"Отправка текста для объекта {obj_id}: {send_url}")
             response = self._request_with_reauth(self.session.post, send_url, json=payload)
@@ -163,7 +154,11 @@ class APIClient:
 
     def process_all_files(self, download_url_template, send_url_template,
                           selection_keywords=None, exclude_keywords=None, max_files=None):
-        """Потоковая обработка файлов текущего списка self.files"""
+        """Потоковая обработка файлов текущего списка self.files.
+
+        Параметры selection_keywords / exclude_keywords оставлены для совместимости,
+        но НЕ применяются при фильтрации — как и раньше.
+        """
         if not self.files:
             logger.info("Нет файлов для обработки")
             return
@@ -188,26 +183,34 @@ class APIClient:
 
             try:
                 raw_text = self.ocr.extract_text(pdf_bytes, fname)
-                logger.info(f"Распознано символов: {len(raw_text)}")
+                logger.info(f"Распознано символов: {len(raw_text) if raw_text else 0}")
             except Exception as e:
-                logger.error(f"Ошибка OCR: {e}")
+                logger.exception(f"Ошибка OCR: {e}")
                 raw_text = ""
-            #Если не Production не отправляем сообщение на сервер IPS
-            raw_stripped = raw_text.strip()
+
+            if not self.is_production:
+                logger.info(f"[TEST] is_production=False, отправка для {obj_id} пропущена")
+                del pdf_bytes, raw_text
+                continue
+
+            raw_stripped = (raw_text or "").strip()
             if not raw_stripped:
                 logger.info("Текст пуст, отправка не требуется")
                 continue
-                        
-            # TODO(DELAGREEN): Загрушка
-            cleared_text = raw_stripped.replace("$", "3").strip()
-            text = [cleared_text]
+
+            # API принимает один мега-блок (массив из одного элемента).
+            # Никаких замен символов: что распознал OCR, то и уходит.
+            text = [raw_stripped]
+
+            if self.debug:
+                preview = raw_stripped[:200].replace("\n", "⏎")
+                logger.debug(f"Текст для {obj_id} ({len(raw_stripped)} симв.): {preview}...")
+
             try:
                 self.send_content(send_url_template, obj_id, text)
-                logger.debug(f"Распознанный текст: {text}")
             except Exception as e:
                 logger.error(f"Ошибка отправки для {obj_id}: {e}")
 
-            #явно очищаем память
             del pdf_bytes, raw_text
 
         logger.info("Обработка завершена")

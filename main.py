@@ -144,6 +144,7 @@ client = APIClient(
     password=API_AUTH_PASSWORD,
     ocr_processor=ProcessorAdapter(token_storage, ocr_engine),
     debug=DEBUG,
+    is_production=IS_PRODUCTION,   
 )
 
 
