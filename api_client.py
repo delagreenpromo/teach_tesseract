@@ -155,6 +155,7 @@ class APIClient:
             logger.info(f"Отправка текста для объекта {obj_id}: {send_url}")
             response = self._request_with_reauth(self.session.post, send_url, json=payload)
             logger.info(f"Текст для объекта {obj_id} успешно отправлен")
+            print(text)
             return True
         except Exception as e:
             logger.error(f"Ошибка отправки текста для объекта {obj_id}: {e}")

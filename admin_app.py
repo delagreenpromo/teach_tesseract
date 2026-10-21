@@ -187,6 +187,9 @@ async def process_uploaded_pdf(file_storage):
         raise ValueError("Файл пустой.")
 
     storage = TokenStorage(db_path=get_token_db_path())
+    # Идём тем же путём, что и main.py — через PdfProcessingFactory → OCRPdfProcessor
+    # → OCRProcessor. ocr_engine не передаём, значит OCRPdfProcessor соберёт его
+    # через _build_default_engine() из config.ini — те же настройки, что и в main.py.
     processor = PdfProcessingFactory.create(filename, token_storage=storage)
     if processor is None:
         file_type = filename.lower().split(".")[-2] if "." in filename.lower() else filename.lower()

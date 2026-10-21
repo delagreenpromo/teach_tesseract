@@ -1,6 +1,7 @@
 import os
 import re
 import sqlite3
+import hashlib
 
 from dotenv import load_dotenv
 from abc import ABC, abstractmethod
@@ -32,6 +33,7 @@ except Exception:  # pragma: no cover
     fitz = None
 
 from logger import logger
+from ocr_processor import OCRProcessor
 
 
 class TokenStorage:
@@ -82,16 +84,18 @@ class TokenStorage:
     def _normalize_token(token):
         if token is None:
             return ""
-        return str(token).replace(" ", " ").strip()
+        return str(token).replace("\xa0", " ").strip()
 
     @staticmethod
     def _tokenize_block_text(text):
+        """Режем блок на строки — это «токены» для обучения."""
         if text is None:
             return []
         normalized = str(text).replace("\xa0", " ").replace("\r\n", "\n").replace("\r", "\n").strip()
         if not normalized:
             return []
-        return [normalized]
+        lines = [line.strip() for line in normalized.split("\n") if line.strip()]
+        return lines or [normalized]
 
     def store_block_tokens(self, block_text, source_file=""):
         if not block_text or not str(block_text).strip():
@@ -133,8 +137,8 @@ class TokenStorage:
 
     @staticmethod
     def _hash_block(block_text):
-        text = "" if block_text is None else str(block_text)
-        return str(abs(hash(text.strip())))
+        text = ("" if block_text is None else str(block_text)).strip()
+        return hashlib.sha1(text.encode("utf-8")).hexdigest()
 
     def get_unique_tokens(self):
         with self._connect() as conn:
@@ -168,7 +172,68 @@ class BasePdfProcessor(ABC):
 
 
 class OCRPdfProcessor(BasePdfProcessor):
-    """OCR-процессор для .dwg.pdf."""
+    """
+    OCR-процессор для .dwg.pdf.
+
+    Тонкая обёртка над ocr_processor.OCRProcessor — тот самый алгоритм,
+    который проверен локально (blocks + дроби + фильтр чертежей).
+    НЕ содержит собственной OCR-логики.
+    """
+
+    def __init__(self, token_storage=None, ocr_engine=None):
+        super().__init__(token_storage=token_storage)
+        self.ocr_engine = ocr_engine if ocr_engine is not None else self._build_default_engine()
+
+    @staticmethod
+    def _build_default_engine():
+        """Собирает OCRProcessor из config.ini (+env), единый источник настроек."""
+        import configparser
+        config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.ini")
+        kwargs = {}
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, encoding="utf-8") as f:
+                    content = os.path.expandvars(f.read())
+                cfg = configparser.ConfigParser(interpolation=None)
+                cfg.read_string(content)
+
+                def get(section, key, fallback=None, cast=str):
+                    env_key = f"{section}_{key}".upper()
+                    env_val = os.environ.get(env_key)
+                    if env_val is not None:
+                        if cast is bool:
+                            return env_val.lower() in ('true', '1', 'yes')
+                        return cast(env_val)
+                    try:
+                        if cast is bool:
+                            return cfg.getboolean(section, key, fallback=fallback)
+                        if cast is int:
+                            return cfg.getint(section, key, fallback=fallback)
+                        if cast is float:
+                            return cfg.getfloat(section, key, fallback=fallback)
+                        return cfg.get(section, key, fallback=fallback)
+                    except Exception:
+                        return fallback
+
+                kwargs = dict(
+                    dpi=get("OCR", "dpi", 300, int),
+                    lang=get("OCR", "lang", "rus", str),
+                    psm=get("OCR", "psm", 6, int),
+                    min_area_ratio=get("OCR", "min_area_ratio", 0.0005, float),
+                    width_tolerance=get("OCR", "width_tolerance", 0.3, float),
+                    save_images=get("Processing", "save_images", False, bool),
+                    save_dir=get("Paths", "results_dir", "results", str),
+                    use_advanced=get("OCR", "use_advanced_recognition", False, bool),
+                    kernel_width=get("OCR", "kernel_width", 20, int),
+                    kernel_height=get("OCR", "kernel_height", 30, int),
+                    dilation_iterations=get("OCR", "dilation_iterations", 3, int),
+                    debug=get("Processing", "debug", False, bool),
+                    production_mode=get("Processing", "is_production", True, bool),
+                    char_whitelist=get("OCR", "char_whitelist", "", str),
+                )
+            except Exception as e:
+                logger.warning(f"OCRPdfProcessor: не удалось прочитать config.ini: {e}")
+        return OCRProcessor(**kwargs)
 
     @classmethod
     def supports(cls, file_name):
@@ -180,56 +245,27 @@ class OCRPdfProcessor(BasePdfProcessor):
             raise RuntimeError("Для OCR требуется cv2 / numpy / pytesseract / pdf2image")
 
         logger.info(f"OCRPdfProcessor: обработка файла {source_name or 'без имени'}")
-        pages = convert_from_bytes(pdf_bytes, dpi=300)
-        if not pages:
-            raise RuntimeError("Не удалось конвертировать PDF в изображения")
+        text, blocks = self.ocr_engine.extract_with_blocks(pdf_bytes, source_name)
 
-        image = np.array(pages[0])
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        gray = cv2.GaussianBlur(gray, (3, 3), 0)
-        _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        custom_config = r"--psm 6 -c preserve_interword_spaces=1"
-        text = pytesseract.image_to_string(binary, lang="rus", config=custom_config).strip()
-        cleaned = self._clean_ocr_text(text)
-        if cleaned:
+        if blocks:
             logger.info(
-                "OCRPdfProcessor: пропускаем запись OCR-результата в TokenStorage для %s; dwg.pdf должен уходить в API без записи в БД.",
+                "OCRPdfProcessor: пропускаем запись OCR-результата в TokenStorage для %s; "
+                "dwg.pdf должен уходить в API без записи в БД.",
                 source_name or 'без имени',
             )
-        return {
-            "text": cleaned,
-            "blocks": [{"text": cleaned, "source": source_name}],
-            "blocks_data": {"block_1": {"text": cleaned, "source": source_name}},
-        }
 
-    @staticmethod
-    def _clean_ocr_text(text):
-        if not text:
-            return ""
-        filtered = re.sub(r"\r+", "\n", text)
-        filtered = filtered.replace("\xa0", " ")
-        filtered = re.sub(r"\n{3,}", "\n\n", filtered)
-        return filtered.strip()
+        return {
+            "text": text or "",
+            "blocks": [{"text": b, "source": source_name} for b in blocks],
+            "blocks_data": {
+                f"block_{i + 1}": {"text": b, "source": source_name}
+                for i, b in enumerate(blocks)
+            },
+        }
 
 
 class TextLayerPdfProcessor(BasePdfProcessor):
     """Text-layer extractor для .cdw/.cwd PDF, с базовой фильтрацией технических требований."""
-
-    STRONG_KEYWORDS = (
-        "ГОСТ",
-        "ОСТ",
-        "ТУ",
-        "РД",
-        "МАТЕРИАЛ",
-        "ПОКРЫТИЕ",
-        "РАЗМЕР",
-        "РАДИУС",
-        "СВАРКА",
-        "КОНТРОЛЬ",
-        "ДОПУСК",
-        "ИНСТРУМЕНТ",
-        "ПРИМЕЧАНИЕ",
-    )
 
     @classmethod
     def supports(cls, file_name):
@@ -374,12 +410,6 @@ class TextLayerPdfProcessor(BasePdfProcessor):
             return False
         cleaned = TextLayerPdfProcessor._filter_requirement_lines(text)
         return bool(cleaned)
-    @staticmethod
-    def _looks_like_requirement_block(text):
-        if not text:
-            return False
-        cleaned = TextLayerPdfProcessor._filter_requirement_lines(text)
-        return bool(cleaned)
 
     def process(self, pdf_bytes, source_name=''):
         if fitz is None:
@@ -444,6 +474,7 @@ class PdfProcessingFactory:
         token = token.replace(" ", "").replace("_", "")
         token = token.strip(".")
         return token
+
     @classmethod
     def _allowed_file_types(cls):
         cls._reload_env()
@@ -518,12 +549,18 @@ class PdfProcessingFactory:
         return cls._env_flag("ENABLE_UNKNOWN_PDF_PROCESSING", True)
 
     @staticmethod
-    def create(file_name, token_storage=None):
+    def create(file_name, token_storage=None, ocr_engine=None):
+        """
+        ocr_engine можно передать явно (например, собранный в main.py из конфига).
+        Если не передан — OCRPdfProcessor соберёт его сам из config.ini.
+        В admin_app.py ocr_engine не передаётся → берётся дефолт из config.ini.
+        Итог: main.py и admin_app.py используют один и тот же OCRProcessor.
+        """
         normalized = str(file_name or '').lower()
         if OCRPdfProcessor.supports(normalized):
             if not PdfProcessingFactory.is_processing_enabled(normalized):
                 return None
-            return OCRPdfProcessor(token_storage=token_storage)
+            return OCRPdfProcessor(token_storage=token_storage, ocr_engine=ocr_engine)
         if TextLayerPdfProcessor.supports(normalized):
             if not PdfProcessingFactory.is_processing_enabled(normalized):
                 return None
@@ -534,7 +571,8 @@ class PdfProcessingFactory:
             return TextLayerPdfProcessor(token_storage=token_storage)
         if not PdfProcessingFactory.is_processing_enabled(normalized):
             return None
-        return OCRPdfProcessor(token_storage=token_storage)
+        return OCRPdfProcessor(token_storage=token_storage, ocr_engine=ocr_engine)
+
 
 __all__ = [
     'BasePdfProcessor',
