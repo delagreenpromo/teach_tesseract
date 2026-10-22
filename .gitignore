@@ -1,21 +1,17 @@
 test
 *venv*
-results
+results/*
 pdf/*
-pdf/processed/*
-pdf/tresh/*
-sub_modules/langdata
-sub_modules/tesseract
+sub_modules/*
 __pycache__
 *.log
 test_server/pdf_storage/*
 *.pdf
 *.PDF
 *.db
+*.vscode*
+*experiments*
 #Not ignored
 !pdf/processed/
 !pdf/results/
 !pdf/tresh/
-*.vscode*
-*results*
-*experiments*
