@@ -507,6 +507,71 @@ class OCRProcessor:
             cleaned_lines.append(' '.join(current_paragraph))
         return '\n'.join(cleaned_lines)
 
+    def _count_max_words_per_row(self, image, bbox):
+        """Максимальное число слов в одной горизонтальной строке блока."""
+        x, y, w, h = bbox
+        roi = image[y:y+h, x:x+w]
+        if roi.size == 0:
+            return 0
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        try:
+            data = pytesseract.image_to_data(
+                gray, lang=self.lang, output_type=Output.DICT, config='--psm 6'
+            )
+        except Exception:
+            return 0
+
+        rows = {}
+        for i in range(len(data['text'])):
+            if not data['text'][i].strip():
+                continue
+            # Уникальный ключ строки: (block_num, par_num, line_num)
+            key = (data['block_num'][i], data['par_num'][i], data['line_num'][i])
+            rows[key] = rows.get(key, 0) + 1
+
+        return max(rows.values(), default=0)
+
+    def filter_noise_blocks(self, image, blocks,
+                            min_words_per_row=3,
+                            min_width_ratio=0.3,
+                            debug=False):
+        """Отсеивает размерные метки и мусор по геометрическим признакам.
+
+        Блок сохраняется, если выполнено хотя бы одно условие:
+        - в какой-либо горизонтальной строке блока ≥ min_words_per_row слов;
+        - ширина блока ≥ min_width_ratio от максимальной ширины блока на странице.
+
+        Размерные метки ('^45°', '7', '2х45°', 'Э ли', '2,5эх 45°') обычно узкие
+        И содержат 1–2 слова в строке — падают по обоим критериям.
+        """
+        if not blocks:
+            return blocks
+
+        max_width = max(b['width'] for b in blocks)
+        width_threshold = max_width * min_width_ratio
+
+        if debug:
+            print(f"[filter_noise] max_width={max_width}, "
+                f"width_threshold={width_threshold:.0f}, "
+                f"min_words_per_row={min_words_per_row}")
+
+        result = []
+        for b in blocks:
+            n_words = self._count_max_words_per_row(image, b['bbox'])
+            wide_enough = b['width'] >= width_threshold
+
+            if n_words >= min_words_per_row or wide_enough:
+                result.append(b)
+            elif debug:
+                print(f"  Блок {b['bbox']} отброшен: "
+                    f"слов/ряд={n_words} (< {min_words_per_row}), "
+                    f"ширина={b['width']} (< {width_threshold:.0f})")
+
+        if debug:
+            print(f"[filter_noise] оставлено {len(result)} из {len(blocks)}")
+
+        return result
+
     # ------------------------------------------------------------------
     # Публичный API
     # ------------------------------------------------------------------
@@ -529,9 +594,16 @@ class OCRProcessor:
             text_blocks = self.detect_text_blocks(image)
             if not text_blocks:
                 continue
-            main_blocks, _ = self.find_main_blocks_by_width(text_blocks)
+            # Новый фильтр: заменяет старый find_main_blocks_by_width,
+            # т.к. уже включает и проверку по ширине, и проверку по словам
+            main_blocks = self.filter_noise_blocks(
+                image, text_blocks,
+                min_words_per_row=3,
+                min_width_ratio=0.3,
+                debug=self.debug,
+            )
             if not main_blocks:
-                main_blocks = text_blocks
+                continue
             sorted_blocks = self.sort_blocks_by_columns(main_blocks, 50)
 
             page_text = []
