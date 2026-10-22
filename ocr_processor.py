@@ -151,8 +151,8 @@ class OCRProcessor:
                         stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT]
             aspect_ratio = max(w, h) / (min(w, h) if min(w, h) > 0 else 1)
 
-            is_line = (aspect_ratio > 10) and (area < 200)
-            is_possible_drawing = (aspect_ratio > 5) and (area < 500)
+            is_line = (aspect_ratio > 10) and (max(w, h) > 30) and (area < 300)
+            is_possible_drawing = (aspect_ratio > 6) and (max(w, h) > 40) and (area < 800)
 
             if is_line or is_possible_drawing:
                 roi_fragment = roi[y:y+h, x:x+w]
@@ -298,9 +298,7 @@ class OCRProcessor:
                     fraction_texts.append(f"{num_clean}/{den_clean}")
                     cleaned_img[y1:y2, x1:x2] = (255, 255, 255)
                     high_word_boxes.append((wd['x'], wd['y'], wd['w'], wd['h']))
-                return cleaned_img, fraction_texts, high_word_boxes
-
-            return block_image, [], []
+            return cleaned_img, fraction_texts, high_word_boxes
         
         return block_image, [], []
     
@@ -427,22 +425,35 @@ class OCRProcessor:
         return result
 
     def find_main_blocks_by_width(self, text_blocks, width_tolerance=None):
+        """
+        Оставляет «основные» текстовые блоки.
+
+        Раньше фильтр отбрасывал и слишком узкие, и слишком широкие блоки
+        (median ± width_tolerance). Из-за верхнего порога длинные строки
+        вроде 'Лист Б-О-ПН-8 ГОСТ 19903-2015/08Х18Н10Т-М4б ГОСТ 7350-77'
+        отбрасывались и не попадали в OCR.
+
+        Теперь режем только слишком узкие блоки: широкие строки — это
+        нормальный текст технических требований.
+        """
         if not text_blocks:
             return [], None
         if width_tolerance is None:
             width_tolerance = self.width_tolerance
+
         widths = [b['width'] for b in text_blocks]
-        median_width = np.median(widths)
+        median_width = float(np.median(widths))
         min_width = median_width * (1 - width_tolerance)
-        max_width = median_width * (1 + width_tolerance)
+
+        matching_blocks = [b for b in text_blocks if b['width'] >= min_width]
+
         if self.debug:
-            print(f"Медианная ширина блоков: {median_width:.0f}, допуск: {min_width:.0f}-{max_width:.0f}")
+            print(f"Медианная ширина блоков: {median_width:.0f}, мин. ширина: {min_width:.0f}")
             for i, b in enumerate(text_blocks):
-                status = "✓" if min_width <= b['width'] <= max_width else "✗"
+                status = "✓" if b['width'] >= min_width else "✗"
                 print(f"  Блок {i}: {b['width']}x{b['height']} {status}")
-        matching_blocks = [b for b in text_blocks if min_width <= b['width'] <= max_width]
-        if self.debug:
             print(f"Основных блоков: {len(matching_blocks)} из {len(text_blocks)}")
+
         return matching_blocks, None
 
     def extract_text_from_block(self, image, block_bbox, debug_words=False):
