@@ -29,7 +29,7 @@ class OCRProcessor:
 
     def __init__(self, dpi=300, lang="rus", psm=6, char_whitelist="", min_area_ratio=0.0005, width_tolerance=0.3,
                  save_images=False, save_dir=None, use_advanced=True,
-                 kernel_width=50, kernel_height=12, dilation_iterations=2,
+                 kernel_width=20, kernel_height=80, dilation_iterations=2,
                  debug=False, production_mode=True, frac_height_ratio=2.0, word_merge_kernel_width=15):
         self.dpi = dpi
         self.lang = lang
@@ -599,7 +599,8 @@ class OCRProcessor:
     # Распознавание текста в блоке
     # ------------------------------------------------------------------
 
-    def extract_text_from_block(self, image, block_bbox, debug_words=False):
+    def extract_text_from_block(self, image, block_bbox, debug_words=False,
+                            apply_drawing_filter=False):   # ← новый параметр
         x, y, w, h = block_bbox
         block_image = image[y:y+h, x:x+w].copy()
 
@@ -615,7 +616,11 @@ class OCRProcessor:
             debug_image_path=debug_path
         )
 
-        cleaned_image = self.filter_drawing_from_roi(cleaned_image)
+        # По умолчанию НЕ применяем: блок уже прошёл conf-based проверку в is_likely_drawing
+        # и фильтр filter_noise_blocks. Дополнительная зачистка только портит
+        # обозначения (Б-О-ПН-8, 2015/08Х18Н10Т, ГОСТ 7350-77).
+        if apply_drawing_filter:
+            cleaned_image = self.filter_drawing_from_roi(cleaned_image)
 
         config = r'--psm 6 -c preserve_interword_spaces=1'
         if self.char_whitelist:
@@ -744,7 +749,7 @@ if __name__ == "__main__":
     parser.add_argument("--debug", action="store_true", help="Включить отладочный вывод в консоль")
     args = parser.parse_args()
 
-    default_pdf = "/home/user/Desktops/Desktop1/Примеры чертежей/Автокад/К7856-12014(0).dwg.pdf"
+    default_pdf = "/home/user/Desktops/Desktop1/Примеры чертежей/Автокад/КЛАБ.302231.008СБ_180567923.dwg.pdf"
     pdf_path = args.pdf_path or (default_pdf if os.path.exists(default_pdf) else None)
     if not pdf_path or not os.path.exists(pdf_path):
         pdf_path = input("Введите путь к PDF-файлу: ").strip()
