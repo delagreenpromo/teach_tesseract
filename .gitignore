@@ -1,5 +1,5 @@
 test
-.venv*
+*venv*
 results
 pdf/*
 pdf/processed/*
@@ -10,6 +10,8 @@ __pycache__
 *.log
 test_server/pdf_storage/*
 *.pdf
+*.PDF
+*.db
 #Not ignored
 !pdf/processed/
 !pdf/results/
