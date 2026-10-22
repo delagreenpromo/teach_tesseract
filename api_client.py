@@ -6,12 +6,21 @@ from ocr_processor import OCRProcessor
 
 
 class APIClient:
-    def __init__(self, username, password, ocr_processor=None, debug: bool = False, is_production: bool = True):
+    def __init__(self, 
+                username,
+                password, 
+                ocr_processor=None, 
+                first_attribute_id=30357, 
+                last_attribute_id=30356, 
+                debug: bool = False, 
+                is_production: bool = True):
         self.username = username
         self.password = password
         self.token = None
         self.ids = []
         self.files = []
+        self.first_attribute_id = first_attribute_id
+        self.last_attribute_id = last_attribute_id
         self.session = requests.Session()
         self.ocr = ocr_processor
         self.debug = debug
@@ -69,7 +78,7 @@ class APIClient:
                 "attributeIdsToSelect": [-2],
                 "conditions": [
                     {
-                        "attributeId": 30357,
+                        "attributeId": self.first_attribute_id,
                         "relationalOperator": "Equal",
                         "logicalOperator": "none",
                         "groupID": 0,
@@ -136,12 +145,12 @@ class APIClient:
             logger.error(f"Ошибка скачивания файла obj={obj_id}, blob={blob_id}: {e}")
             return None
 
-    def send_content(self, send_url_template, obj_id, text: list, first_attribute_id=30357, last_attribute_id=30356):
+    def send_content(self, send_url_template, obj_id, text: list):
         try:
             send_url = send_url_template.format(obj_id=obj_id)
             payload = [
-                {"attributeID": first_attribute_id, "values": ["true"]},
-                {"attributeID": last_attribute_id, "values": text}
+                {"attributeID": self.first_attribute_id, "values": ["true"]},
+                {"attributeID": self.last_attribute_id, "values": text}
             ]
             logger.info(f"Отправка текста для объекта {obj_id}: {send_url}")
             response = self._request_with_reauth(self.session.post, send_url, json=payload)

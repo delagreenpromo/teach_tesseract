@@ -54,6 +54,8 @@ API_DOWNLOAD_ENDPOINT = get_config("API", "download_endpoint")
 API_SEND_CONTENT = get_config("API", "send_content")
 API_AUTH_USERNAME = get_config("API", "username")
 API_AUTH_PASSWORD = get_config("API", "password")
+API_FIRST_ATTRIBUTE_ID = get_config("API", "first_attribute_id")
+API_LAST_ATTRIBUTE_ID = get_config("API", "last_attribute_id")
 
 # ----------------------- Параметры OCR (для локального OCRProcessor) -----------------------
 DPI = get_config("OCR", "dpi", fallback=300, type=int)
@@ -143,6 +145,8 @@ client = APIClient(
     username=API_AUTH_USERNAME,
     password=API_AUTH_PASSWORD,
     ocr_processor=ProcessorAdapter(token_storage, ocr_engine),
+    first_attribute_id=API_FIRST_ATTRIBUTE_ID,
+    last_attribute_id=API_LAST_ATTRIBUTE_ID,
     debug=DEBUG,
     is_production=IS_PRODUCTION,   
 )
