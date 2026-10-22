@@ -265,15 +265,14 @@ class OCRPdfProcessor(BasePdfProcessor):
 
 
 class TextLayerPdfProcessor(BasePdfProcessor):
-    """Text-layer extractor для .cdw/.cwd PDF, с базовой фильтрацией технических требований."""
+    """Text-layer extractor для .cdw/PDF, с базовой фильтрацией технических требований."""
 
     @classmethod
     def supports(cls, file_name):
         name = str(file_name or "").lower()
         return (
             ".cdw.pdf" in name or name.endswith(".cdw.pdf") or
-            ".cwd.pdf" in name or name.endswith(".cwd.pdf") or
-            ".cdw" in name or ".cwd" in name
+            ".cdw" in name
         )
 
     @staticmethod
@@ -507,7 +506,7 @@ class PdfProcessingFactory:
     def _file_type_tokens(cls, file_name):
         normalized = str(file_name or "").lower()
         tokens = set()
-        for suffix in (".dwg.pdf", ".cdw.pdf", ".cwd.pdf", ".dwg", ".cdw", ".cwd"):
+        for suffix in (".dwg.pdf", ".cdw.pdf", ".dwg", ".cdw"):
             if suffix in normalized:
                 tokens.update({
                     cls._normalize_type_token(suffix),
@@ -521,8 +520,6 @@ class PdfProcessingFactory:
             tokens.update({"dwg", "dwg.pdf"})
         if ".cdw.pdf" in normalized or normalized.endswith(".cdw.pdf") or ".cdw" in normalized:
             tokens.update({"cdw", "cdw.pdf"})
-        if ".cwd.pdf" in normalized or normalized.endswith(".cwd.pdf") or ".cwd" in normalized:
-            tokens.update({"cwd", "cwd.pdf"})
         return tokens
 
     @classmethod
@@ -544,8 +541,6 @@ class PdfProcessingFactory:
             return cls._env_flag("ENABLE_DWG_PDF_PROCESSING", True)
         if ".cdw.pdf" in normalized or normalized.endswith(".cdw.pdf") or ".cdw" in normalized:
             return cls._env_flag("ENABLE_CDW_PDF_PROCESSING", True)
-        if ".cwd.pdf" in normalized or normalized.endswith(".cwd.pdf") or ".cwd" in normalized:
-            return cls._env_flag("ENABLE_CWD_PDF_PROCESSING", True)
         return cls._env_flag("ENABLE_UNKNOWN_PDF_PROCESSING", True)
 
     @staticmethod
