@@ -13,8 +13,6 @@ os.environ["QT_QPA_PLATFORM"] = "xcb"
 
 
 class OCRProcessor:
-    # Маркеры штампов ЭЦП и служебных надписей, которые не являются частью
-    # технических требований чертежа. Блоки с этими подстроками отбрасываются.
     _STAMP_MARKERS = (
         "документ подписан",
         "сертификат :",
@@ -25,11 +23,20 @@ class OCRProcessor:
         "копиробал",
         "версия:",
         "эцп",
+        "лит.",
+        "масса",
+        "масшт",
+        "сборочный чертеж",
+        "формат а4",
+        "формат а3",
+        "формат а2",
+        "формат а1",
+        "формат а0",
     )
 
     def __init__(self, dpi=300, lang="rus", psm=6, char_whitelist="", min_area_ratio=0.0005, width_tolerance=0.3,
                  save_images=False, save_dir=None, use_advanced=True,
-                 kernel_width=20, kernel_height=80, dilation_iterations=2,
+                 kernel_width=40, kernel_height=60, dilation_iterations=2,
                  debug=False, production_mode=True, frac_height_ratio=2.0, word_merge_kernel_width=15):
         self.dpi = dpi
         self.lang = lang
@@ -70,16 +77,7 @@ class OCRProcessor:
                                        cv2.THRESH_BINARY_INV, 11, 2)
         return binary
 
-    # ------------------------------------------------------------------
-    # Проверки блоков
-    # ------------------------------------------------------------------
-
     def _is_real_text_block(self, roi):
-        """True, если блок содержит реальный текст, а не мусор от чертёжных штрихов.
-
-        Использует confidence-скоры Tesseract: настоящий текст даёт слова
-        с conf ≥ 60, случайные штрихи — 0–30.
-        """
         if roi.size == 0:
             return False
         try:
@@ -109,13 +107,10 @@ class OCRProcessor:
 
             stripped = text.rstrip('.,:;!?')
 
-            # Настоящее слово: только буквы, 3+, conf ≥ 60
             if re.fullmatch(r'[А-Яа-яЁёA-Za-z]{3,}', stripped) and conf >= 60:
                 good_words += 1
                 continue
 
-            # Обозначение (ГОСТ 2590-2006, 08Х18Н10Т, Б-О-ПН-8, справок.):
-            # ≥ 4 символов из «текстового» набора, есть ≥ 2 букв подряд, conf ≥ 50
             if (len(stripped) >= 4
                     and re.fullmatch(r'[А-Яа-яЁёA-Za-z0-9\-./,№()]+', stripped)
                     and re.search(r'[А-Яа-яЁёA-Za-z]{2,}', stripped)
@@ -123,12 +118,9 @@ class OCRProcessor:
                 good_words += 1
 
         avg_conf = (total_conf / n_conf) if n_conf else 0
-
-        # Настоящий текст: минимум 2 «хороших» слова ИЛИ 1 слово + высокий средний conf
         return good_words >= 2 or (good_words >= 1 and avg_conf >= 75)
 
     def is_likely_drawing(self, roi, block_info=None):
-        """Возвращает True, если блок содержит много линий/контуров (чертёж)."""
         if roi.size == 0:
             return False
         h, w = roi.shape[:2]
@@ -136,7 +128,6 @@ class OCRProcessor:
         if area_total == 0:
             return False
 
-        # Быстрая проверка: если по confidence это настоящий текст — сразу выходим
         if self._is_real_text_block(roi):
             if self.debug and block_info:
                 print(f"  Блок {block_info} оставлен как текст (conf-based)")
@@ -172,8 +163,6 @@ class OCRProcessor:
         reasons = []
 
         if is_small_block:
-            # На мелких блоках статистические метрики шумят — пороги выше,
-            # и требуем совпадения нескольких признаков одновременно.
             if contour_ratio > 0.55 and hough_ratio > 0.10:
                 reasons.append(f"small:contour+hough ({contour_ratio:.3f}, {hough_ratio:.3f})")
             if corner_ratio > 0.20 and hough_ratio > 0.15:
@@ -195,18 +184,12 @@ class OCRProcessor:
         return False
 
     def _is_stamp_block(self, text):
-        """True, если блок является штампом ЭЦП или служебной надписью."""
         if not text:
             return False
         low = text.lower()
         return any(m in low for m in self._STAMP_MARKERS)
 
-    # ------------------------------------------------------------------
-    # Работа с фракциями и штрихами
-    # ------------------------------------------------------------------
-
     def _find_fraction_line(self, word_roi):
-        """Ищет горизонтальную линию внутри ROI, возвращает Y-координату центра линии или None."""
         gray = cv2.cvtColor(word_roi, cv2.COLOR_BGR2GRAY)
         _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
@@ -224,11 +207,6 @@ class OCRProcessor:
         return y + h // 2
 
     def filter_drawing_from_roi(self, roi):
-        """Удаляет из ROI всё, что похоже на чертёж, оставляя только текст.
-
-        Пороги ослаблены, чтобы не затирать короткие легитимные штрихи:
-        дефисы в 'Б-О-ПН-8', слэши в '2015/08Х18Н10Т', точки в 'ГОСТ 2590-2006'.
-        """
         if roi.size == 0:
             return roi
         gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
@@ -243,8 +221,6 @@ class OCRProcessor:
                          stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT]
             aspect_ratio = max(w, h) / (min(w, h) if min(w, h) > 0 else 1)
 
-            # Было (10, >30, <300) / (6, >40, <800) — слишком агрессивно,
-            # выедало дефисы и слэши в обозначениях стали.
             is_line = (aspect_ratio > 12) and (max(w, h) > 60) and (area < 300)
             is_possible_drawing = (aspect_ratio > 8) and (max(w, h) > 80) and (area < 800)
 
@@ -259,7 +235,6 @@ class OCRProcessor:
         return cleaned
 
     def _is_text_fragment(self, fragment):
-        """Быстрая проверка, содержит ли фрагмент хотя бы один символ текста."""
         if fragment.size == 0:
             return False
         try:
@@ -307,7 +282,6 @@ class OCRProcessor:
         return block_image, None
 
     def get_merged_word_boxes(self, roi):
-        """Возвращает bounding box'ы слов после горизонтального склеивания."""
         gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
         data = pytesseract.image_to_data(gray, lang=self.lang,
                                          output_type=Output.DICT,
@@ -396,10 +370,6 @@ class OCRProcessor:
 
         return block_image, [], []
 
-    # ------------------------------------------------------------------
-    # Детекция и фильтрация блоков
-    # ------------------------------------------------------------------
-
     def detect_text_blocks(self, image):
         img_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         binary = self.preprocess_image(img_rgb)
@@ -437,7 +407,7 @@ class OCRProcessor:
                 "area": area,
                 "width": w,
                 "height": h,
-                "aspect_ratio": w / h if h > 0 else 0,
+                "aspect_ratio": w / h if h > 0 else 1,
             })
         if self.debug:
             print(f"Найдено {len(text_blocks)} текстовых блоков из {len(contours)} контуров")
@@ -445,45 +415,51 @@ class OCRProcessor:
 
     def sort_blocks_by_columns(self, text_blocks, x_tolerance=None):
         """
-        Сортирует блоки в порядке чтения.
+        Сортирует блоки в порядке чтения по правилу:
+          1. Сначала по X по УБЫВАНИЮ (справа налево).
+          2. Блоки с близкими X объединяются в одну «колонку» (x_tolerance).
+          3. Внутри колонки — по Y по ВОЗРАСТАНИЮ (сверху вниз).
 
-        Техтребования — одна вертикальная колонка, поэтому нужен порядок «сверху вниз».
-        Широкие блоки вроде «Лист Б-О-ПН-8 ГОСТ …» при X-сортировке улетали в конец
-        (их левый край близок к 0 и они выделялись в отдельную «колонку»),
-        теперь встают на своё место.
+        Пример:
+          [2500,40], [2000,40], [1500,38], [1499,200]
+          → [2500,40], [2000,40], [1500,38], [1499,200]
 
-        Для много­колоночных layout'ов сначала группируем блоки в Y-полосы,
-        внутри полосы сортируем по X (слева направо).
+        [2500,40] и [2000,40] — разные X-колонки (X-desc: 2500 → 2000).
+        [1500,38] и [1499,200] — одна X-колонка (|1500-1499| ≤ tolerance),
+        внутри неё Y-asc: 38 → 200.
         """
         if not text_blocks:
             return []
 
-        y_tolerance = 30
-        sorted_by_y = sorted(text_blocks, key=lambda b: b['bbox'][1])
+        if x_tolerance is None:
+            x_tolerance = 100
 
-        bands = []
-        current_band = [sorted_by_y[0]]
-        for block in sorted_by_y[1:]:
-            band_y = current_band[0]['bbox'][1]
-            if abs(block['bbox'][1] - band_y) <= y_tolerance:
-                current_band.append(block)
+        # Шаг 1: сортируем по X по убыванию (справа налево)
+        sorted_by_x = sorted(text_blocks, key=lambda b: b['bbox'][0], reverse=True)
+
+        # Шаг 2: группируем в колонки по X (сравниваем с первым блоком колонки)
+        columns = []
+        current_column = [sorted_by_x[0]]
+        for block in sorted_by_x[1:]:
+            column_x = current_column[0]['bbox'][0]
+            if abs(block['bbox'][0] - column_x) <= x_tolerance:
+                current_column.append(block)
             else:
-                current_band.sort(key=lambda b: b['bbox'][0])
-                bands.append(current_band)
-                current_band = [block]
-        current_band.sort(key=lambda b: b['bbox'][0])
-        bands.append(current_band)
+                # Внутри колонки сортируем по Y по возрастанию
+                current_column.sort(key=lambda b: b['bbox'][1])
+                columns.append(current_column)
+                current_column = [block]
+        current_column.sort(key=lambda b: b['bbox'][1])
+        columns.append(current_column)
 
+        # Шаг 3: разворачиваем колонки в плоский список
         result = []
-        for band in bands:
-            result.extend(band)
+        for col in columns:
+            result.extend(col)
         return result
 
     def find_main_blocks_by_width(self, text_blocks, width_tolerance=None):
-        """
-        Оставлен для обратной совместимости. В основном потоке больше не используется —
-        его заменил filter_noise_blocks (учитывает и ширину, и слова в строке).
-        """
+        """Оставлен для обратной совместимости. В основном потоке не используется."""
         if not text_blocks:
             return [], None
         if width_tolerance is None:
@@ -505,13 +481,6 @@ class OCRProcessor:
         return matching_blocks, None
 
     def _count_max_words_per_row(self, image, bbox, conf_threshold=40):
-        """Возвращает (max_words_per_row, max_word_len) для блока.
-
-        - max_words_per_row — максимальное число токенов в одной горизонтальной строке;
-        - max_word_len — длина самого длинного слова (в буквах, без цифр/знаков).
-
-        Слова с conf < conf_threshold игнорируются, чтобы случайные штрихи не считались.
-        """
         x, y, w, h = bbox
         roi = image[y:y+h, x:x+w]
         if roi.size == 0:
@@ -555,15 +524,6 @@ class OCRProcessor:
                             min_width_ratio=0.15,
                             min_word_len=4,
                             debug=False):
-        """Отсеивает размерные метки и мусор по геометрическим признакам.
-
-        Блок сохраняется, если выполнено хотя бы одно условие:
-          - ширина блока ≥ min_width_ratio от максимальной ширины блока на странице;
-          - в какой-либо строке ≥ min_words_per_row слов И есть слово ≥ min_word_len букв.
-
-        Размерные метки ('^45°', '7', '2х45°', 'Э ли', '2,5эх 45°') узкие и содержат
-        1–2 коротких слова — падают по обоим критериям.
-        """
         if not blocks:
             return blocks
 
@@ -595,12 +555,8 @@ class OCRProcessor:
 
         return result
 
-    # ------------------------------------------------------------------
-    # Распознавание текста в блоке
-    # ------------------------------------------------------------------
-
     def extract_text_from_block(self, image, block_bbox, debug_words=False,
-                            apply_drawing_filter=False):   # ← новый параметр
+                                apply_drawing_filter=False):
         x, y, w, h = block_bbox
         block_image = image[y:y+h, x:x+w].copy()
 
@@ -616,9 +572,6 @@ class OCRProcessor:
             debug_image_path=debug_path
         )
 
-        # По умолчанию НЕ применяем: блок уже прошёл conf-based проверку в is_likely_drawing
-        # и фильтр filter_noise_blocks. Дополнительная зачистка только портит
-        # обозначения (Б-О-ПН-8, 2015/08Х18Н10Т, ГОСТ 7350-77).
         if apply_drawing_filter:
             cleaned_image = self.filter_drawing_from_roi(cleaned_image)
 
@@ -655,15 +608,56 @@ class OCRProcessor:
             cleaned_lines.append(' '.join(current_paragraph))
         return '\n'.join(cleaned_lines)
 
-    # ------------------------------------------------------------------
-    # Публичный API
-    # ------------------------------------------------------------------
+    def _filter_garbage_lines(self, text):
+        if not text:
+            return ""
+
+        result = []
+        for line in text.split('\n'):
+            stripped = line.strip()
+            if not stripped:
+                continue
+
+            if len(stripped) <= 2:
+                continue
+
+            if len(stripped) < 20 and not re.search(r'[А-Яа-яЁёA-Za-z]{2,}', stripped):
+                continue
+
+            if re.fullmatch(r'[А-ЯA-Z]?\s*\(\d+:\d+\)', stripped):
+                continue
+
+            rare = len(re.findall(r'[|\[\]${}\^\\<>`]', stripped))
+            if rare >= 2 and len(stripped) < 40:
+                continue
+
+            alnum = len(re.findall(r'[А-Яа-яЁёA-Za-z0-9]', stripped))
+            if len(stripped) < 40 and alnum / len(stripped) < 0.6:
+                continue
+
+            if self._is_stamp_block(stripped):
+                continue
+
+            if re.search(r'(.)\1\1', stripped):
+                if not re.search(r'(\.{3,}|-{3,}|_{3,})', stripped):
+                    continue
+
+            garbage_words = 0
+            for w in re.findall(r'[А-Яа-яЁёA-Za-z]{4,}', stripped):
+                if not re.search(r'[аеёиоуыэюяАЕЁИОУЫЭЮЯaeiouyAEIOUY]', w):
+                    garbage_words += 1
+            if garbage_words >= 2:
+                continue
+
+            if (len(stripped) < 15
+                    and not re.search(r'[.:;]$', stripped)
+                    and not re.match(r'^[\d\-*]', stripped)):
+                continue
+
+            result.append(line)
+        return '\n'.join(result)
 
     def extract_with_blocks(self, pdf_bytes, file_name):
-        """
-        Возвращает (text, blocks), где blocks — список распознанных блоков (строк).
-        Используется в pdf_processors.OCRPdfProcessor и в админке.
-        """
         images = self.pdf_to_images(pdf_bytes)
         if not images:
             return "", []
@@ -687,7 +681,12 @@ class OCRProcessor:
             )
             if not main_blocks:
                 continue
+
             sorted_blocks = self.sort_blocks_by_columns(main_blocks, 50)
+
+            if self.debug:
+                for b in sorted_blocks:
+                    print(f"  [sort] bbox={b['bbox']}")
 
             page_text = []
             for block_info in sorted_blocks:
@@ -695,10 +694,18 @@ class OCRProcessor:
                 cleaned = self.clean_text(block_text)
                 if not cleaned:
                     continue
+
+                cleaned = self._filter_garbage_lines(cleaned)
+                if not cleaned:
+                    if self.debug:
+                        print(f"  Блок {block_info['bbox']} полностью отфильтрован как мусор")
+                    continue
+
                 if self._is_stamp_block(cleaned):
                     if self.debug:
                         print(f"  Блок {block_info['bbox']} отброшен как штамп/служебное")
                     continue
+
                 page_text.append(cleaned)
                 all_blocks.append(cleaned)
 
@@ -735,12 +742,10 @@ class OCRProcessor:
         return '\n\n'.join(full_text), all_blocks
 
     def extract_text(self, pdf_bytes, file_name):
-        """Возвращает только текст (для обратной совместимости и __main__)."""
         text, _ = self.extract_with_blocks(pdf_bytes, file_name)
         return text
 
 
-# ----------------------- АВТОНОМНЫЙ ЗАПУСК -----------------------
 if __name__ == "__main__":
     import argparse
 
