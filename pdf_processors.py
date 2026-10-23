@@ -186,54 +186,24 @@ class OCRPdfProcessor(BasePdfProcessor):
 
     @staticmethod
     def _build_default_engine():
-        """Собирает OCRProcessor из config.ini (+env), единый источник настроек."""
-        import configparser
-        config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.ini")
-        kwargs = {}
-        if os.path.exists(config_path):
-            try:
-                with open(config_path, encoding="utf-8") as f:
-                    content = os.path.expandvars(f.read())
-                cfg = configparser.ConfigParser(interpolation=None)
-                cfg.read_string(content)
-
-                def get(section, key, fallback=None, cast=str):
-                    env_key = f"{section}_{key}".upper()
-                    env_val = os.environ.get(env_key)
-                    if env_val is not None:
-                        if cast is bool:
-                            return env_val.lower() in ('true', '1', 'yes')
-                        return cast(env_val)
-                    try:
-                        if cast is bool:
-                            return cfg.getboolean(section, key, fallback=fallback)
-                        if cast is int:
-                            return cfg.getint(section, key, fallback=fallback)
-                        if cast is float:
-                            return cfg.getfloat(section, key, fallback=fallback)
-                        return cfg.get(section, key, fallback=fallback)
-                    except Exception:
-                        return fallback
-
-                kwargs = dict(
-                    dpi=get("OCR", "dpi", 300, int),
-                    lang=get("OCR", "lang", "rus", str),
-                    psm=get("OCR", "psm", 6, int),
-                    min_area_ratio=get("OCR", "min_area_ratio", 0.0005, float),
-                    width_tolerance=get("OCR", "width_tolerance", 0.3, float),
-                    save_images=get("Processing", "save_images", False, bool),
-                    save_dir=get("Paths", "results_dir", "results", str),
-                    use_advanced=get("OCR", "use_advanced_recognition", False, bool),
-                    kernel_width=get("OCR", "kernel_width", 20, int),
-                    kernel_height=get("OCR", "kernel_height", 30, int),
-                    dilation_iterations=get("OCR", "dilation_iterations", 3, int),
-                    debug=get("Processing", "debug", False, bool),
-                    production_mode=get("Processing", "is_production", True, bool),
-                    char_whitelist=get("OCR", "char_whitelist", "", str),
-                )
-            except Exception as e:
-                logger.warning(f"OCRPdfProcessor: не удалось прочитать config.ini: {e}")
-        return OCRProcessor(**kwargs)
+        """Собирает OCRProcessor из env через config_env — единый источник настроек."""
+        import config_env as cfg
+        return OCRProcessor(
+            dpi=cfg.OCR_DPI,
+            lang=cfg.OCR_LANG,
+            psm=cfg.OCR_PSM,
+            min_area_ratio=cfg.OCR_MIN_AREA_RATIO,
+            width_tolerance=cfg.OCR_WIDTH_TOLERANCE,
+            save_images=cfg.SAVE_IMAGES,
+            save_dir=cfg.RESULTS_DIR,
+            use_advanced=cfg.OCR_USE_ADVANCED_RECOGNITION,
+            kernel_width=cfg.OCR_KERNEL_WIDTH,
+            kernel_height=cfg.OCR_KERNEL_HEIGHT,
+            dilation_iterations=cfg.OCR_DILATION_ITERATIONS,
+            debug=cfg.DEBUG,
+            production_mode=cfg.IS_PRODUCTION,
+            char_whitelist=cfg.OCR_CHAR_WHITELIST,
+        )
 
     @classmethod
     def supports(cls, file_name):
@@ -547,8 +517,8 @@ class PdfProcessingFactory:
     def create(file_name, token_storage=None, ocr_engine=None):
         """
         ocr_engine можно передать явно (например, собранный в main.py из конфига).
-        Если не передан — OCRPdfProcessor соберёт его сам из config.ini.
-        В admin_app.py ocr_engine не передаётся → берётся дефолт из config.ini.
+        Если не передан — OCRPdfProcessor соберёт его сам из env.
+        В admin_app.py ocr_engine не передаётся → берётся дефолт из env.
         Итог: main.py и admin_app.py используют один и тот же OCRProcessor.
         """
         normalized = str(file_name or '').lower()

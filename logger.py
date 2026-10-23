@@ -1,14 +1,11 @@
 import logging
 import os
 import inspect
-
-# Получаем уровень логирования из переменной окружения, по умолчанию INFO
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-LOG_FILE = os.getenv("LOG_FILE", "logs.log")
+import config_env as cfg
 
 # Создаём логгер
 logger = logging.getLogger("custom_logger")
-logger.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
+logger.setLevel(getattr(logging, cfg.LOG_LEVEL, logging.INFO))
 
 # Настраиваем логгирование только один раз
 if not logger.handlers:
@@ -20,7 +17,7 @@ if not logger.handlers:
     logger.addHandler(console_handler)
 
     # Файловый хендлер
-    file_handler = logging.FileHandler(LOG_FILE, encoding='utf-8', mode='a')
+    file_handler = logging.FileHandler(cfg.LOG_FILE, encoding='utf-8', mode='a')
     file_handler.setFormatter(formatter)
     logger.addHandler(file_handler)
 
