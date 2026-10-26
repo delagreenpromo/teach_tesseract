@@ -37,11 +37,8 @@ class OCRProcessor:
         "разраб.",
         "пров.",
         "утв.",
-        "изм.",
-        "лист",
         "№ докум.",
         "подп.",
-        "дата"
     )
 
     def __init__(self, dpi=300, lang="rus", psm=6, char_whitelist="", min_area_ratio=0.0005, width_tolerance=0.3,
@@ -292,23 +289,12 @@ class OCRProcessor:
 
         for i in range(1, num_labels):
             area = stats[i, cv2.CC_STAT_AREA]
-            x, y, w, h = stats[i, cv2.CC_STAT_LEFT], stats[i, cv2.CC_STAT_TOP], \
-                         stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT]
-            aspect_ratio = max(w, h) / (min(w, h) if min(w, h) > 0 else 1)
-
-            is_line = (aspect_ratio > 12) and (max(w, h) > 60) and (area < 300)
-            is_possible_drawing = (aspect_ratio > 8) and (max(w, h) > 80) and (area < 800)
-
-            if is_line or is_possible_drawing:
-                # Защита: не стираем объекты, которые находятся прямо внутри текста
-                roi_fragment = roi[y:y+h, x:x+w]
-                if self._is_text_fragment(roi_fragment):
-                    continue
-                
-                # Если это очень длинная линия (рамка) — стираем без вопросов
-                if max(w, h) > 300:
-                    drawing_mask[labels == i] = 255
-                    continue
+            x, y, w, h = stats[i, cv2.CC_STAT_LEFT], stats[i, cv2.CC_STAT_TOP], stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT]
+            
+            # Удаляем только длинные линии (рамки, границы таблиц).
+            # Буквы и дефисы (длина до 150px) остаются нетронутыми.
+            if max(w, h) > 150 and (min(w, h) < 10 or area < 1000):
+                drawing_mask[labels == i] = 255
 
         cleaned = roi.copy()
         cleaned[drawing_mask > 0] = (255, 255, 255)
@@ -509,51 +495,22 @@ class OCRProcessor:
         if block_image.size == 0:
             return ""
 
-        def get_text(cfg):
-            try:
-                data = pytesseract.image_to_data(
-                    block_image, lang=self.lang, output_type=Output.DICT, config=cfg
-                )
-            except Exception:
-                return ""
-            
-            lines = {}
-            for i in range(len(data['text'])):
-                text = data['text'][i].strip()
-                if not text:
-                    continue
-                try:
-                    conf = int(float(data['conf'][i]))
-                except (ValueError, TypeError):
-                    continue
-                if conf < 0:
-                    continue
-                key = (data['block_num'][i], data['par_num'][i], data['line_num'][i])
-                entry = lines.setdefault(
-                    key, {'words': [], 'top': float('inf'), 'left': float('inf')}
-                )
-                entry['words'].append(text)
-                entry['top'] = min(entry['top'], data['top'][i])
-                entry['left'] = min(entry['left'], data['left'][i])
+        # 1. Увеличиваем блок в 2 раза (спасает буквы и мелкие дефисы)
+        h, w = block_image.shape[:2]
+        if h < 400:
+            block_image = cv2.resize(block_image, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
 
-            ordered = sorted(lines.values(), key=lambda l: (l['top'], l['left']))
-            return '\n'.join(' '.join(l['words']) for l in ordered)
+        # 2. Используем PSM 6 (сплошной блок текста)
+        config = r'--psm 6 -c preserve_interword_spaces=1'
+        text = pytesseract.image_to_string(block_image, lang=self.lang, config=config).strip()
 
-        # 1. Пробуем стандартный PSM 6
-        cfg6 = r'--psm 6 -c preserve_interword_spaces=1'
-        if self.char_whitelist:
-            cfg6 += f' -c tessedit_char_whitelist="{self.char_whitelist}"'
-        text = get_text(cfg6)
-
-        # 2. Если текста слишком мало (значит, PSM 6 не справился с широким блоком) — включаем PSM 11
-        if len(text.strip()) < 15:
-            cfg11 = r'--psm 11 -c preserve_interword_spaces=1'
-            if self.char_whitelist:
-                cfg11 += f' -c tessedit_char_whitelist="{self.char_whitelist}"'
-            text_11 = get_text(cfg11)
-            if len(text_11.strip()) > len(text.strip()):
-                text = text_11
-
+        # 3. Если PSM 6 вдруг прочитал мало текста, пробуем PSM 4 (колонка)
+        if len(text) < 50:
+            config4 = r'--psm 4 -c preserve_interword_spaces=1'
+            text4 = pytesseract.image_to_string(block_image, lang=self.lang, config=config4).strip()
+            if len(text4) > len(text):
+                text = text4
+                
         return text
 
     def _is_stamp_roi(self, roi):
@@ -799,13 +756,84 @@ class OCRProcessor:
 
         return result
 
-    def extract_text_from_block(self, image, block_bbox, debug_words=False,
-                            apply_drawing_filter=False):
+    def _remove_horizontal_lines(self, img):
+        """Удаляет длинные горизонтальные линии (рамки, дроби), чтобы они не мешали OCR."""
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        # Инвертируем цвета: текст и линии станут белыми, фон черным
+        _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
         
+        # Ядро для поиска горизонтальных линий (шириной в 1/5 от ширины блока)
+        h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (max(30, img.shape[1] // 5), 1))
+        lines = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, h_kernel)
+        
+        # Вычитаем линии из оригинального изображения
+        clean_thresh = cv2.subtract(thresh, lines)
+        
+        # Возвращаем нормальные цвета (черный текст на белом фоне)
+        result = cv2.bitwise_not(clean_thresh)
+        return result
+
+    def _extract_with_complex_layout(self, block_image):
+        """Находит линию дроби, режет блок на 3 части (лево, числитель, знаменатель)."""
+        gray = cv2.cvtColor(block_image, cv2.COLOR_BGR2GRAY)
+        _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+        # Ищем горизонтальную линию (ядро 50 пикселей в ширину, 1 в высоту)
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (50, 1))
+        lines = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
+        
+        contours, _ = cv2.findContours(lines, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return None
+
+        # Берем самую длинную линию
+        best_cnt = max(contours, key=cv2.contourArea)
+        lx, ly, lw, lh = cv2.boundingRect(best_cnt)
+
+        # Если линия начинается в самом начале блока — это рамка, а не дробь
+        if lw < 50 or lx < 20:
+            return None
+
+        # РЕЖЕМ КАРТИНКУ:
+        # 1. Левая часть (весь текст до линии, включая пункты 1, 2, 3, 4)
+        left_part = block_image[:, 0:lx]
+        
+        # 2. Числитель (верхняя часть справа от линии)
+        num_part = block_image[0:ly - 2, lx:]
+        
+        # 3. Знаменатель (нижняя часть справа от линии)
+        den_part = block_image[ly + lh + 1:, lx:]
+
+        def ocr(roi, psm=6):
+            if roi.size == 0:
+                return ""
+            gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+            # Бинаризация (черный текст на белом фоне)
+            _, thresh = cv2.threshold(gray_roi, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            # Увеличение в 2.5 раза для четкого распознавания
+            upscaled = cv2.resize(thresh, None, fx=2.5, fy=2.5, interpolation=cv2.INTER_CUBIC)
+            return pytesseract.image_to_string(upscaled, lang=self.lang, config=f'--psm {psm}').strip()
+
+        left_txt = ocr(left_part, psm=6)
+        num_txt = ocr(num_part, psm=7)
+        den_txt = ocr(den_part, psm=7)
+
+        if not left_txt or not num_txt or not den_txt:
+            return None
+
+        num_txt = re.sub(r'\s+', ' ', num_txt)
+        den_txt = re.sub(r'\s+', ' ', den_txt)
+
+        lines_txt = left_txt.split('\n')
+        if lines_txt:
+            # Приклеиваем дробь к первой строке (1 Материал-заменитель: Лист ...)
+            lines_txt[0] = f"{lines_txt[0]} {num_txt}/{den_txt}"
+            
+        return '\n'.join(lines_txt)
+
+    def extract_text_from_block(self, image, block_bbox, debug_words=False, **kwargs):
         x, y, w, h = block_bbox
-        
-        # Делаем одинаковые небольшие отступы, чтобы не захватывать линии рамки
-        pad = 10
+        pad = 15
         x1 = max(0, x - pad)
         y1 = max(0, y - pad)
         x2 = min(image.shape[1], x + w + pad)
@@ -813,44 +841,40 @@ class OCRProcessor:
         
         block_image = image[y1:y2, x1:x2].copy()
 
-        debug_path = None
         if debug_words and self.save_dir:
             os.makedirs(self.save_dir, exist_ok=True)
             debug_path = os.path.join(self.save_dir, f"words_{x}_{y}.png")
+            cv2.imwrite(debug_path, block_image)
 
-        # <<< НОВОЕ: пробуем распознать как дробь >>>
-        fraction_text, is_fraction = self._extract_as_fraction(block_image)
-        if is_fraction:
-            return fraction_text, True, []
+        # 1. ПЫТАЕМСЯ РАЗРЕЗАТЬ ПО ЛИНИИ
+        custom_result = self._extract_with_complex_layout(block_image)
+        if custom_result:
+            return custom_result, False, []
 
-        # Если не дробь — обычный пайплайн
-        cleaned_image, fraction_texts, fraction_boxes = self.analyze_block_for_fractions(
-            block_image,
-            frac_height_ratio=self.frac_height_ratio,
-            debug_words=debug_words,
-            debug_image_path=debug_path
-        )
-
-        if apply_drawing_filter:
-            cleaned_image = self.filter_drawing_from_roi(cleaned_image)
-
-        main_text = self._extract_ordered_text(cleaned_image)
-
-        final_text = main_text
-        if fraction_texts:
-            for frac in fraction_texts:
-                final_text += f" {frac}"
-
-        return final_text, bool(fraction_texts), fraction_boxes
+        # 2. ОБЫЧНОЕ РАСПОЗНАВАНИЕ (если линии нет)
+        gray = cv2.cvtColor(block_image, cv2.COLOR_BGR2GRAY)
+        _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        block_image = cv2.resize(thresh, None, fx=2.5, fy=2.5, interpolation=cv2.INTER_CUBIC)
+        
+        config = r'--psm 4 -c preserve_interword_spaces=1'
+        if self.char_whitelist:
+            config += f' -c tessedit_char_whitelist="{self.char_whitelist}"'
+            
+        main_text = pytesseract.image_to_string(block_image, lang=self.lang, config=config).strip()
+        return main_text, False, []
 
     def clean_text(self, text):
         if not text:
             return ""
+        
         lines = [line.strip() for line in text.split('\n') if line.strip()]
         cleaned_lines = []
         current_paragraph = []
+        
         for line in lines:
-            if line.endswith(('.', ':', ';')) or len(line) < 50:
+            # Если строка начинается с цифры (новый пункт) или заканчивается точкой
+            is_new_item = re.match(r'^\d+\s', line)
+            if line.endswith(('.', ':', ';')) or len(line) < 50 or is_new_item:
                 if current_paragraph:
                     current_paragraph.append(line)
                     cleaned_lines.append(' '.join(current_paragraph))
@@ -859,8 +883,10 @@ class OCRProcessor:
                     cleaned_lines.append(line)
             else:
                 current_paragraph.append(line)
+                
         if current_paragraph:
             cleaned_lines.append(' '.join(current_paragraph))
+            
         return '\n'.join(cleaned_lines)
 
     def _filter_garbage_lines(self, text):
@@ -891,6 +917,15 @@ class OCRProcessor:
                 continue
 
             if self._is_stamp_block(stripped):
+                continue
+            
+            # ЖЕСТКИЙ ФИЛЬТР ШТАМПА (основная надпись)
+            # Отсекает строки вроде "Изм|Лист| № докум.", "Разраб.", "Подп."
+            if re.match(r'^(Изм|Разраб|Пров|Т\.контр|Н\.контр|Утв)\b', stripped, re.IGNORECASE):
+                continue
+            
+            # Отсекаем "Лист 1", "Лист 2", но НЕ трогаем "Лист Б-0-ПН-8..."
+            if re.match(r'^Лист\s*\d+\s*$', stripped, re.IGNORECASE):
                 continue
 
             if re.search(r'(.)\1\1', stripped):
@@ -989,7 +1024,7 @@ class OCRProcessor:
                 block_text, _, _ = self.extract_text_from_block(
                     image, 
                     block_info['bbox'], 
-                    apply_drawing_filter=True)
+                    apply_drawing_filter=False)
                 cleaned = self.clean_text(block_text)
                 if not cleaned:
                     continue
