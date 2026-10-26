@@ -774,11 +774,11 @@ class OCRProcessor:
         return result
 
     def _extract_with_complex_layout(self, block_image):
-        """Находит линию дроби и режет блок на 4 независимые зоны."""
+        """Находит линию дроби и режет блок на зоны, не захватывая лишний чертеж."""
         gray = cv2.cvtColor(block_image, cv2.COLOR_BGR2GRAY)
         _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
-        # Ищем длинную горизонтальную линию (ядро 50 пикселей)
+        # Ищем длинную горизонтальную линию
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (50, 1))
         lines = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
 
@@ -786,45 +786,35 @@ class OCRProcessor:
         if not contours:
             return None
 
-        # Берем саму длинную линию
         best_cnt = max(contours, key=cv2.contourArea)
         lx, ly, lw, lh = cv2.boundingRect(best_cnt)
 
-        # Защита: если линия начинается с самого левого края — это рамка, а не дробь
         if lw < 50 or lx < 20:
             return None
 
         h, w = block_image.shape[:2]
 
-        # 1. Левая верхняя часть (1 Материал-заменитель: Лист)
-        left_part = block_image[0:ly, 0:lx]
-
-        # 2. Числитель (Б-0-ПН-8 ГОСТ...)
-        num_part = block_image[0:ly, lx:]
-
-        # 3. Знаменатель (08Х18Н10Т...). Берем строго 80 пикселей под линией.
-        den_y1 = ly + lh
-        den_y2 = min(h, den_y1 + 80)
-        den_part = block_image[den_y1:den_y2, lx:]
-
-        # 4. Нижняя часть (Пункты 2, 3, 4). Берем на полную ширину блока!
-        bottom_part = block_image[den_y2:h, 0:]
+        # !!! ГЛАВНЫЙ ФИКС С ОБРЕЗКОЙ !!!
+        # Берем полосу высотой +-40 пикселей от линии, чтобы не захватить чертеж сверху
+        left_part = block_image[max(0, ly - 40):min(h, ly + 40), 0:lx]
+        num_part = block_image[max(0, ly - 60):ly - 2, lx:]
+        den_part = block_image[ly + lh + 1:min(h, ly + lh + 60), lx:]
+        
+        # Нижняя часть начинается сразу под знаменателем
+        bottom_start = min(h, ly + lh + 60)
+        bottom_part = block_image[bottom_start:h, 0:]
 
         def ocr(roi, psm=6):
             if roi.size == 0:
                 return ""
+            # Убираем агрессивную бинаризацию! Просто Grayscale + Upscale x2.5
             gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-            _, thresh = cv2.threshold(gray_roi, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-            # Увеличение x2.5 для четкости
-            upscaled = cv2.resize(thresh, None, fx=2.5, fy=2.5, interpolation=cv2.INTER_CUBIC)
+            upscaled = cv2.resize(gray_roi, None, fx=2.5, fy=2.5, interpolation=cv2.INTER_CUBIC)
             return pytesseract.image_to_string(upscaled, lang=self.lang, config=f'--psm {psm}').strip()
 
-        # Распознаем куски (левая и правая части первой строки — это однострочники, PSM 7)
         left_txt = ocr(left_part, psm=7)
         num_txt = ocr(num_part, psm=7)
         den_txt = ocr(den_part, psm=7)
-        
-        # Пункты 2,3,4 — это абзац, используем PSM 6
         bottom_txt = ocr(bottom_part, psm=6)
 
         if not left_txt or not num_txt or not den_txt:
@@ -833,7 +823,6 @@ class OCRProcessor:
         num_txt = re.sub(r'\s+', ' ', num_txt)
         den_txt = re.sub(r'\s+', ' ', den_txt)
 
-        # Склеиваем первую строку
         first_line = f"{left_txt} {num_txt}/{den_txt}"
         result = f"{first_line}\n{bottom_txt}" if bottom_txt else first_line
 
