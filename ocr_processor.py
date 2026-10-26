@@ -32,6 +32,7 @@ class OCRProcessor:
         "формат а2",
         "формат а1",
         "формат а0",
+        "контр"
     )
 
     def __init__(self, dpi=300, lang="rus", psm=6, char_whitelist="", min_area_ratio=0.0005, width_tolerance=0.3,
