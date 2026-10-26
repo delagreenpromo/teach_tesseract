@@ -191,10 +191,27 @@ class OCRProcessor:
         return any(m in low for m in self._STAMP_MARKERS)
 
     def _find_fraction_line(self, word_roi):
+        """Ищет горизонтальную линию-разделитель дроби внутри ROI.
+
+        Возвращает Y-координату центра линии или None.
+
+        Отсекает линии рамки чертежа, которые на маленьких A4 проходят
+        вплотную к тексту и ложно интерпретируются как дробная черта:
+
+        - рамка обычно занимает > 85% ширины ROI;
+        - рамка часто идёт по самому краю ROI (top/bottom);
+        - у настоящей дробной черты высота 1–2 px, у контура рамки
+            высота может разъезжаться при Otsu/морфологии.
+        """
         gray = cv2.cvtColor(word_roi, cv2.COLOR_BGR2GRAY)
         _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
-        line_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (word_roi.shape[1] // 3, 1))
+        roi_w = word_roi.shape[1]
+        roi_h = word_roi.shape[0]
+        if roi_w < 10 or roi_h < 10:
+            return None
+
+        line_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (roi_w // 3, 1))
         opened = cv2.morphologyEx(binary, cv2.MORPH_OPEN, line_kernel)
 
         contours, _ = cv2.findContours(opened, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -203,9 +220,26 @@ class OCRProcessor:
 
         best_cnt = max(contours, key=cv2.contourArea)
         x, y, w, h = cv2.boundingRect(best_cnt)
-        if w < word_roi.shape[1] * 0.3:
+
+        # 1) Слишком короткая — не дробь
+        if w < roi_w * 0.3:
             return None
-        return y + h // 2
+
+        # 2) Слишком длинная (почти на всю ширину) — это рамка, а не дробная черта
+        if w > roi_w * 0.85:
+            return None
+
+        # 3) Контур «толстый» по вертикали — это не линия, а закрашенная область
+        if h > max(8, int(roi_h * 0.10)):
+            return None
+
+        line_center_y = y + h // 2
+
+        # 4) Линия на самом краю ROI — это рамка/подчёркивание, не дробь
+        if line_center_y < roi_h * 0.15 or line_center_y > roi_h * 0.85:
+            return None
+
+        return line_center_y
 
     def filter_drawing_from_roi(self, roi):
         if roi.size == 0:
@@ -234,6 +268,30 @@ class OCRProcessor:
         cleaned = roi.copy()
         cleaned[drawing_mask > 0] = (255, 255, 255)
         return cleaned
+
+    @staticmethod
+    def _looks_like_real_fraction(num_text, den_text):
+        """True, если num/den — действительно дробь ('1', '2', '5/16', 'Ø8'),
+        а не куски длинного обозначения стали/ГОСТа.
+        """
+        num = (num_text or "").strip()
+        den = (den_text or "").strip()
+        if not num or not den:
+            return False
+
+        # Дробь — это одно короткое «слово» сверху и одно снизу, без длинных фраз
+        if len(num.split()) > 1 or len(den.split()) > 1:
+            return False
+
+        # Ни числитель, ни знаменатель не должны быть длинными
+        if len(num) > 12 or len(den) > 12:
+            return False
+
+        # В дроби обычно только цифры/латиница/°, не должно быть «ГОСТ», «МПа», «мм»
+        if re.search(r'[А-Яа-яЁё]{3,}', num) or re.search(r'[А-Яа-яЁё]{3,}', den):
+            return False
+
+        return True
 
     def _is_text_fragment(self, fragment):
         if fragment.size == 0:
@@ -352,7 +410,8 @@ class OCRProcessor:
 
                 line_y = self._find_fraction_line(word_roi)
                 if line_y is None:
-                    line_y = word_roi.shape[0] // 2
+                    # линии-разделителя нет — это не дробь (например, высокий логотип)
+                    continue
 
                 top_part = word_roi[0:line_y, :]
                 bot_part = word_roi[line_y:, :]
@@ -362,10 +421,19 @@ class OCRProcessor:
                 num_clean = re.sub(r'[^\w.,\-]', '', num_text)
                 den_clean = re.sub(r'[^\w.,\-]', '', den_text)
 
-                if num_clean and den_clean:
-                    fraction_texts.append(f"{num_clean}/{den_clean}")
-                    cleaned_img[y1:y2, x1:x2] = (255, 255, 255)
-                    high_word_boxes.append((wd['x'], wd['y'], wd['w'], wd['h']))
+                if not num_clean or not den_clean:
+                    continue
+
+                # <<< ГЛАВНЫЙ ФИКС >>>
+                # Если это не дробь, а длинный текст (обозначение стали), оставляем
+                # high_word на месте — пусть image_to_string прочитает его как обычный
+                # текст блока в правильном порядке. НЕ вырезаем, НЕ приклеиваем как "num/den".
+                if not self._looks_like_real_fraction(num_clean, den_clean):
+                    continue
+
+                fraction_texts.append(f"{num_clean}/{den_clean}")
+                cleaned_img[y1:y2, x1:x2] = (255, 255, 255)
+                high_word_boxes.append((wd['x'], wd['y'], wd['w'], wd['h']))
 
             return cleaned_img, fraction_texts, high_word_boxes
 
@@ -755,7 +823,7 @@ if __name__ == "__main__":
     parser.add_argument("--debug", action="store_true", help="Включить отладочный вывод в консоль")
     args = parser.parse_args()
 
-    default_pdf = "/home/user/Desktops/Desktop1/Примеры чертежей/Автокад/КЛАБ.302231.008СБ_180567923.dwg.pdf"
+    default_pdf = ""
     pdf_path = args.pdf_path or (default_pdf if os.path.exists(default_pdf) else None)
     if not pdf_path or not os.path.exists(pdf_path):
         pdf_path = input("Введите путь к PDF-файлу: ").strip()
