@@ -108,3 +108,44 @@ def validate_runtime_config():
             "установлены в False. Обработка не будет выполнять ни отправку, "
             "ни логирование."
         )
+
+# ============================================================
+# OCR: per-format настройки (автоопределение по размеру страницы)
+# ============================================================
+# Если формат страницы определён, OCRProcessor берёт kernel_width /
+# kernel_height / dilation_iterations из этой секции.
+# Если для формата ничего не задано — fallback на общие OCR_KERNEL_*.
+#
+# Размеры форматов (landscape, мм, длинная сторона):
+#   A4: 297   A3: 420   A2: 594   A1: 841   A0: 1189
+#
+# Автоопределение считается как max(width, height) / DPI * 25.4 (в мм).
+OCR_AUTO_FORMAT = env("OCR_AUTO_FORMAT", True, bool)
+
+OCR_FORMAT_SETTINGS = {
+    "A4": {
+        "kernel_width": env("OCR_KERNEL_A4_WIDTH", 30, int),
+        "kernel_height": env("OCR_KERNEL_A4_HEIGHT", 40, int),
+        "dilation_iterations": env("OCR_DILATION_A4", 2, int),
+    },
+    "A3": {
+        "kernel_width": env("OCR_KERNEL_A3_WIDTH", 30, int),
+        "kernel_height": env("OCR_KERNEL_A3_HEIGHT", 60, int),
+        "dilation_iterations": env("OCR_DILATION_A3", 2, int),
+    },
+    "A2": {
+        "kernel_width": env("OCR_KERNEL_A2_WIDTH", 30, int),
+        "kernel_height": env("OCR_KERNEL_A2_HEIGHT", 90, int),
+        "dilation_iterations": env("OCR_DILATION_A2", 2, int),
+    },
+    "A1": {
+        "kernel_width": env("OCR_KERNEL_A1_WIDTH", 40, int),
+        "kernel_height": env("OCR_KERNEL_A1_HEIGHT", 120, int),
+        "dilation_iterations": env("OCR_DILATION_A1", 2, int),
+    },
+    "A0": {
+        "kernel_width": env("OCR_KERNEL_A0_WIDTH", 40, int),
+        "kernel_height": env("OCR_KERNEL_A0_HEIGHT", 150, int),
+        "dilation_iterations": env("OCR_DILATION_A0", 2, int),
+    },
+}

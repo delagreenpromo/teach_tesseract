@@ -44,6 +44,8 @@ ocr_engine = OCRProcessor(
     debug=cfg.DEBUG,
     production_mode=cfg.IS_PRODUCTION,
     char_whitelist=cfg.OCR_CHAR_WHITELIST,
+    format_settings=cfg.OCR_FORMAT_SETTINGS,
+    auto_format=cfg.OCR_AUTO_FORMAT, 
 )
 
 

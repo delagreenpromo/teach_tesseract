@@ -15,8 +15,7 @@ os.environ["QT_QPA_PLATFORM"] = "xcb"
 class OCRProcessor:
     _STAMP_MARKERS = (
         "документ подписан",
-        "сертификат :",
-        "сертификат:",
+        "сертификат",
         "владелец подписи",
         "действительно с",
         "копировал",
@@ -32,13 +31,24 @@ class OCRProcessor:
         "формат а2",
         "формат а1",
         "формат а0",
-        "контр"
+        # Штампы и основная надпись:
+        "т.контр.",
+        "н.контр.",
+        "разраб.",
+        "пров.",
+        "утв.",
+        "изм.",
+        "лист",
+        "№ докум.",
+        "подп.",
+        "дата"
     )
 
     def __init__(self, dpi=300, lang="rus", psm=6, char_whitelist="", min_area_ratio=0.0005, width_tolerance=0.3,
                  save_images=False, save_dir=None, use_advanced=True,
                  kernel_width=40, kernel_height=60, dilation_iterations=2,
-                 debug=False, production_mode=True, frac_height_ratio=2.0, word_merge_kernel_width=15):
+                 debug=False, production_mode=True, frac_height_ratio=2.0, word_merge_kernel_width=15,
+                 format_settings=None, auto_format=True):
         self.dpi = dpi
         self.lang = lang
         self.psm = psm
@@ -55,9 +65,57 @@ class OCRProcessor:
         self.char_whitelist = char_whitelist
         self.frac_height_ratio = frac_height_ratio
         self.word_merge_kernel_width = word_merge_kernel_width
+        self.format_settings = format_settings or {}
+        self.auto_format = auto_format
 
         if self.save_images or not self.production_mode:
             os.makedirs(self.save_dir, exist_ok=True)
+
+    def _detect_page_format(self, image):
+        """Определяет формат страницы по длинной стороне в мм.
+
+        DPI-нормализация: max(w, h) / dpi * 25.4 = длинная сторона в мм.
+        Диапазоны подобраны так, чтобы захватывать обрезки/рамки:
+        A4: < 350 мм   (A4 = 297 мм)
+        A3: 350–480    (A3 = 420 мм)
+        A2: 480–650    (A2 = 594 мм)
+        A1: 650–900    (A1 = 841 мм)
+        A0: >= 900     (A0 = 1189 мм)
+        """
+        h, w = image.shape[:2]
+        max_dim_mm = max(w, h) / self.dpi * 25.4
+
+        if max_dim_mm < 350:
+            return "A4"
+        if max_dim_mm < 480:
+            return "A3"
+        if max_dim_mm < 650:
+            return "A2"
+        if max_dim_mm < 900:
+            return "A1"
+        return "A0"
+
+    def _resolve_kernel_params(self, image):
+        """Возвращает (kernel_width, kernel_height, dilation_iterations) для страницы.
+
+        Приоритет:
+        1. per-format настройка (если auto_format=True и формат определён);
+        2. общие self.kernel_* (fallback).
+        """
+        if not self.auto_format or not self.format_settings:
+            return self.kernel_width, self.kernel_height, self.dilation_iterations
+
+        fmt = self._detect_page_format(image)
+        settings = self.format_settings.get(fmt) or {}
+
+        kw = settings.get("kernel_width", self.kernel_width)
+        kh = settings.get("kernel_height", self.kernel_height)
+        di = settings.get("dilation_iterations", self.dilation_iterations)
+
+        if self.debug:
+            print(f"[auto_format] формат={fmt}, kernel={kw}x{kh}, iter={di}")
+
+        return kw, kh, di
 
     def pdf_to_images(self, pdf_bytes):
         try:
@@ -129,11 +187,6 @@ class OCRProcessor:
         if area_total == 0:
             return False
 
-        if self._is_real_text_block(roi):
-            if self.debug and block_info:
-                print(f"  Блок {block_info} оставлен как текст (conf-based)")
-            return False
-
         gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
         _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
@@ -154,34 +207,21 @@ class OCRProcessor:
                 cv2.line(line_mask, (x1, y1), (x2, y2), 255, 2)
         hough_ratio = cv2.countNonZero(line_mask) / area_total
 
-        gray_float = np.float32(gray)
-        dst = cv2.cornerHarris(gray_float, blockSize=2, ksize=3, k=0.04)
-        dst = cv2.dilate(dst, None)
-        corners = np.argwhere(dst > 0.01 * dst.max())
-        corner_ratio = len(corners) / area_total
-
-        is_small_block = h < 150 or w < 500
-        reasons = []
-
-        if is_small_block:
-            if contour_ratio > 0.55 and hough_ratio > 0.10:
-                reasons.append(f"small:contour+hough ({contour_ratio:.3f}, {hough_ratio:.3f})")
-            if corner_ratio > 0.20 and hough_ratio > 0.15:
-                reasons.append(f"small:corner+hough ({corner_ratio:.3f}, {hough_ratio:.3f})")
-        else:
-            if contour_ratio > 0.3:
-                reasons.append(f"contour_ratio={contour_ratio:.3f}")
-            if hough_ratio > 0.02 and (contour_ratio > 0.05 or corner_ratio > 0.05):
-                reasons.append(f"hough_ratio={hough_ratio:.3f}")
-            if corner_ratio > 0.1:
-                reasons.append(f"corner_ratio={corner_ratio:.3f}")
-            if contour_ratio > 0.15 and hough_ratio > 0.01:
-                reasons.append(f"contour+hough ({contour_ratio:.3f}, {hough_ratio:.3f})")
-
-        if reasons:
+        # Если контуров/линий очень много — это точно чертёж, даже если есть текст
+        if contour_ratio > 0.4 and hough_ratio > 0.1:
             if self.debug and block_info:
-                print(f"  Блок {block_info} отброшен как чертёж: {', '.join(reasons)}")
+                print(f"  Блок {block_info} отброшен как чертёж (много линий)")
             return True
+
+        # Если текста нет — тоже отбрасываем
+        if not self._is_real_text_block(roi):
+            if self.debug and block_info:
+                print(f"  Блок {block_info} отброшен (нет текста)")
+            return True
+
+        # Если текста много и линий мало — оставляем
+        if self.debug and block_info:
+            print(f"  Блок {block_info} оставлен как текст")
         return False
 
     def _is_stamp_block(self, text):
@@ -260,10 +300,15 @@ class OCRProcessor:
             is_possible_drawing = (aspect_ratio > 8) and (max(w, h) > 80) and (area < 800)
 
             if is_line or is_possible_drawing:
+                # Защита: не стираем объекты, которые находятся прямо внутри текста
                 roi_fragment = roi[y:y+h, x:x+w]
                 if self._is_text_fragment(roi_fragment):
                     continue
-                drawing_mask[labels == i] = 255
+                
+                # Если это очень длинная линия (рамка) — стираем без вопросов
+                if max(w, h) > 300:
+                    drawing_mask[labels == i] = 255
+                    continue
 
         cleaned = roi.copy()
         cleaned[drawing_mask > 0] = (255, 255, 255)
@@ -303,42 +348,63 @@ class OCRProcessor:
         except Exception:
             return False
 
-    def handle_fractions_in_block(self, block_image):
+    def _extract_as_fraction(self, block_image):
+        """Ищет горизонтальную линию, режет блок на 2 части, распознаёт их 
+        и склеивает в вид 'числитель/знаменатель'.
+        
+        Возвращает (text, is_fraction).
+        """
         gray = cv2.cvtColor(block_image, cv2.COLOR_BGR2GRAY)
         _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
-        lines = cv2.HoughLinesP(binary, rho=1, theta=np.pi/180, threshold=30,
-                                minLineLength=block_image.shape[1] * 0.4,
-                                maxLineGap=3)
-        if lines is None:
-            return block_image, None
+        # Ищем длинную горизонтальную линию
+        h, w = block_image.shape[:2]
 
-        line_ys = []
+        if h > 200 or w > 400:
+            return None, False
+
+        lines = cv2.HoughLinesP(binary, rho=1, theta=np.pi/180, threshold=30,
+                                minLineLength=w * 0.3, maxLineGap=5)
+        
+        if lines is None:
+            return None, False
+
+        # Находим саму длинную горизонтальную линию
+        best_y = None
+        best_len = 0
         for line in lines:
             x1, y1, x2, y2 = line[0]
-            if abs(y2 - y1) > 5:
+            if abs(y2 - y1) > 3:  # не горизонтальная
                 continue
-            line_ys.append((min(y1, y2) + max(y1, y2)) // 2)
+            length = abs(x2 - x1)
+            if length > best_len:
+                best_len = length
+                best_y = (y1 + y2) // 2
 
-        if not line_ys:
-            return block_image, None
+        if best_y is None or best_y < h * 0.15 or best_y > h * 0.85:
+            return None, False
 
-        y_center = int(np.median(line_ys))
+        # Режем
+        top_part = block_image[0:best_y - 2, :]
+        bot_part = block_image[best_y + 2:, :]
 
-        top_part = block_image[0:y_center, :]
-        bot_part = block_image[y_center:, :]
+        if top_part.size == 0 or bot_part.size == 0:
+            return None, False
 
-        top_text = pytesseract.image_to_string(top_part, lang=self.lang, config='--psm 7').strip()
-        bot_text = pytesseract.image_to_string(bot_part, lang=self.lang, config='--psm 7').strip()
+        # Распознаём по отдельности
+        config = '--psm 7'
+        top_text = pytesseract.image_to_string(top_part, lang=self.lang, config=config).strip()
+        bot_text = pytesseract.image_to_string(bot_part, lang=self.lang, config=config).strip()
 
-        if top_text and bot_text:
-            fraction_str = f"{top_text}/{bot_text}"
-            cleaned = block_image.copy()
-            margin = 2
-            cleaned[max(0, y_center-margin):min(block_image.shape[0], y_center+margin), :] = (255, 255, 255)
-            return cleaned, fraction_str
+        # Чистим от мусора
+        top_clean = re.sub(r'[^\w.,\-]', '', top_text)
+        bot_clean = re.sub(r'[^\w.,\-]', '', bot_text)
 
-        return block_image, None
+        # Если обе части содержат текст — это дробь
+        if top_clean and bot_clean:
+            return f"{top_clean}/{bot_clean}", True
+
+        return None, False
 
     def get_merged_word_boxes(self, roi):
         gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
@@ -439,12 +505,72 @@ class OCRProcessor:
 
         return block_image, [], []
 
+    def _extract_ordered_text(self, block_image):
+        if block_image.size == 0:
+            return ""
+
+        def get_text(cfg):
+            try:
+                data = pytesseract.image_to_data(
+                    block_image, lang=self.lang, output_type=Output.DICT, config=cfg
+                )
+            except Exception:
+                return ""
+            
+            lines = {}
+            for i in range(len(data['text'])):
+                text = data['text'][i].strip()
+                if not text:
+                    continue
+                try:
+                    conf = int(float(data['conf'][i]))
+                except (ValueError, TypeError):
+                    continue
+                if conf < 0:
+                    continue
+                key = (data['block_num'][i], data['par_num'][i], data['line_num'][i])
+                entry = lines.setdefault(
+                    key, {'words': [], 'top': float('inf'), 'left': float('inf')}
+                )
+                entry['words'].append(text)
+                entry['top'] = min(entry['top'], data['top'][i])
+                entry['left'] = min(entry['left'], data['left'][i])
+
+            ordered = sorted(lines.values(), key=lambda l: (l['top'], l['left']))
+            return '\n'.join(' '.join(l['words']) for l in ordered)
+
+        # 1. Пробуем стандартный PSM 6
+        cfg6 = r'--psm 6 -c preserve_interword_spaces=1'
+        if self.char_whitelist:
+            cfg6 += f' -c tessedit_char_whitelist="{self.char_whitelist}"'
+        text = get_text(cfg6)
+
+        # 2. Если текста слишком мало (значит, PSM 6 не справился с широким блоком) — включаем PSM 11
+        if len(text.strip()) < 15:
+            cfg11 = r'--psm 11 -c preserve_interword_spaces=1'
+            if self.char_whitelist:
+                cfg11 += f' -c tessedit_char_whitelist="{self.char_whitelist}"'
+            text_11 = get_text(cfg11)
+            if len(text_11.strip()) > len(text.strip()):
+                text = text_11
+
+        return text
+
+    def _is_stamp_roi(self, roi):
+        """Быстрая проверка: если в блоке есть текст подписи — выкидываем его."""
+        try:
+            # Берем только 1 строку для скорости
+            text = pytesseract.image_to_string(roi, lang=self.lang, config='--psm 6').lower()
+            return self._is_stamp_block(text)
+        except Exception:
+            return False
+
     def detect_text_blocks(self, image):
         img_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         binary = self.preprocess_image(img_rgb)
 
         data = pytesseract.image_to_data(img_rgb, lang=self.lang, output_type=Output.DICT,
-                                         config=f'--psm {self.psm}')
+                                         config='--psm 11')
 
         mask = np.zeros_like(binary)
         for i in range(len(data["level"])):
@@ -452,8 +578,9 @@ class OCRProcessor:
                 x, y, w, h = data["left"][i], data["top"][i], data["width"][i], data["height"][i]
                 mask[y:y+h, x:x+w] = 255
 
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (self.kernel_width, self.kernel_height))
-        dilated = cv2.dilate(mask, kernel, iterations=self.dilation_iterations)
+        kw, kh, di = self._resolve_kernel_params(image)
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kw, kh))
+        dilated = cv2.dilate(mask, kernel, iterations=di)
 
         contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if not contours:
@@ -471,6 +598,12 @@ class OCRProcessor:
             roi = image[y:y+h, x:x+w]
             if self.use_advanced and self.is_likely_drawing(roi, block_info=f"#{idx} ({w}x{h})"):
                 continue
+
+            if self._is_stamp_roi(roi):
+                if self.debug:
+                    print(f"  Блок #{idx} отброшен как ЭЦП/штамп")
+                continue
+
             text_blocks.append({
                 "bbox": (x, y, w, h),
                 "area": area,
@@ -481,6 +614,48 @@ class OCRProcessor:
         if self.debug:
             print(f"Найдено {len(text_blocks)} текстовых блоков из {len(contours)} контуров")
         return text_blocks
+
+    def _merge_adjacent_boxes(self, blocks):
+        if not blocks:
+            return []
+
+        sorted_blocks = sorted(blocks, key=lambda b: b['bbox'][1])
+        merged = []
+
+        for block in sorted_blocks:
+            x, y, w, h = block['bbox']
+            merged_into_existing = False
+
+            for i, existing in enumerate(merged):
+                ex_x, ex_y, ex_w, ex_h = existing['bbox']
+
+                # Вычисляем расстояние между краями
+                gap_x = max(0, max(x, ex_x) - min(x + w, ex_x + ex_w))
+                gap_y = max(0, max(y, ex_y) - min(y + h, ex_y + ex_h))
+
+                # Если блоки находятся рядом (ближе 150 px по Y и ближе 300 px по X)
+                if gap_y < 200 and gap_x < 1000:
+                    
+                    # Не склеиваем, если один из блоков — это огромный чертёж
+                    if max(w, h) > 2000 or max(ex_w, ex_h) > 2000:
+                        continue
+
+                    new_x = min(x, ex_x)
+                    new_y = min(y, ex_y)
+                    new_w = max(x + w, ex_x + ex_w) - new_x
+                    new_h = max(y + h, ex_y + ex_h) - new_y
+
+                    merged[i]['bbox'] = (new_x, new_y, new_w, new_h)
+                    merged[i]['width'] = new_w
+                    merged[i]['height'] = new_h
+                    merged_into_existing = True
+                    break
+
+            if not merged_into_existing:
+                merged.append(block)
+
+        return merged
+
 
     def sort_blocks_by_columns(self, text_blocks, x_tolerance=None):
         """
@@ -625,15 +800,30 @@ class OCRProcessor:
         return result
 
     def extract_text_from_block(self, image, block_bbox, debug_words=False,
-                                apply_drawing_filter=False):
+                            apply_drawing_filter=False):
+        
         x, y, w, h = block_bbox
-        block_image = image[y:y+h, x:x+w].copy()
+        
+        # Делаем одинаковые небольшие отступы, чтобы не захватывать линии рамки
+        pad = 10
+        x1 = max(0, x - pad)
+        y1 = max(0, y - pad)
+        x2 = min(image.shape[1], x + w + pad)
+        y2 = min(image.shape[0], y + h + pad)
+        
+        block_image = image[y1:y2, x1:x2].copy()
 
         debug_path = None
         if debug_words and self.save_dir:
             os.makedirs(self.save_dir, exist_ok=True)
             debug_path = os.path.join(self.save_dir, f"words_{x}_{y}.png")
 
+        # <<< НОВОЕ: пробуем распознать как дробь >>>
+        fraction_text, is_fraction = self._extract_as_fraction(block_image)
+        if is_fraction:
+            return fraction_text, True, []
+
+        # Если не дробь — обычный пайплайн
         cleaned_image, fraction_texts, fraction_boxes = self.analyze_block_for_fractions(
             block_image,
             frac_height_ratio=self.frac_height_ratio,
@@ -644,18 +834,14 @@ class OCRProcessor:
         if apply_drawing_filter:
             cleaned_image = self.filter_drawing_from_roi(cleaned_image)
 
-        config = r'--psm 6 -c preserve_interword_spaces=1'
-        if self.char_whitelist:
-            config += f' -c tessedit_char_whitelist="{self.char_whitelist}"'
-        main_text = pytesseract.image_to_string(cleaned_image, lang=self.lang, config=config).strip()
+        main_text = self._extract_ordered_text(cleaned_image)
 
         final_text = main_text
         if fraction_texts:
             for frac in fraction_texts:
                 final_text += f" {frac}"
 
-        has_fraction = bool(fraction_texts)
-        return final_text, has_fraction, fraction_boxes
+        return final_text, bool(fraction_texts), fraction_boxes
 
     def clean_text(self, text):
         if not text:
@@ -726,6 +912,44 @@ class OCRProcessor:
             result.append(line)
         return '\n'.join(result)
 
+    def _suppress_overlapping_boxes(self, blocks):
+        """Удаляет блоки, которые сильно накладываются друг на друга (IoU > 0.3)."""
+        if not blocks:
+            return []
+        
+        # Сортируем по площади (от больших к меньшим)
+        sorted_blocks = sorted(blocks, key=lambda b: b['width'] * b['height'], reverse=True)
+        result = []
+        
+        for block in sorted_blocks:
+            x1, y1, w1, h1 = block['bbox']
+            x2, y2 = x1 + w1, y1 + h1
+            
+            keep = True
+            for existing in result:
+                ex1, ey1, ew1, eh1 = existing['bbox']
+                ex2, ey2 = ex1 + ew1, ey1 + eh1
+                
+                inter_x1 = max(x1, ex1)
+                inter_y1 = max(y1, ey1)
+                inter_x2 = min(x2, ex2)
+                inter_y2 = min(y2, ey2)
+                
+                if inter_x1 < inter_x2 and inter_y1 < inter_y2:
+                    inter_area = (inter_x2 - inter_x1) * (inter_y2 - inter_y1)
+                    area1 = w1 * h1
+                    area2 = ew1 * eh1
+                    
+                    # Если блок на 30% лежит внутри другого, считаем его дублем
+                    if inter_area / min(area1, area2) > 0.3:
+                        keep = False
+                        break
+            
+            if keep:
+                result.append(block)
+                
+        return result
+
     def extract_with_blocks(self, pdf_bytes, file_name):
         images = self.pdf_to_images(pdf_bytes)
         if not images:
@@ -740,6 +964,9 @@ class OCRProcessor:
             text_blocks = self.detect_text_blocks(image)
             if not text_blocks:
                 continue
+
+            text_blocks = self._merge_adjacent_boxes(text_blocks)
+            text_blocks = self._suppress_overlapping_boxes(text_blocks)
 
             main_blocks = self.filter_noise_blocks(
                 image, text_blocks,
@@ -759,7 +986,10 @@ class OCRProcessor:
 
             page_text = []
             for block_info in sorted_blocks:
-                block_text, _, _ = self.extract_text_from_block(image, block_info['bbox'])
+                block_text, _, _ = self.extract_text_from_block(
+                    image, 
+                    block_info['bbox'], 
+                    apply_drawing_filter=True)
                 cleaned = self.clean_text(block_text)
                 if not cleaned:
                     continue
