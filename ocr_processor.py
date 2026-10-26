@@ -774,49 +774,58 @@ class OCRProcessor:
         return result
 
     def _extract_with_complex_layout(self, block_image):
-        """Находит линию дроби, режет блок на 3 части (лево, числитель, знаменатель)."""
+        """Находит линию дроби и режет блок на 4 независимые зоны."""
         gray = cv2.cvtColor(block_image, cv2.COLOR_BGR2GRAY)
         _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
-        # Ищем горизонтальную линию (ядро 50 пикселей в ширину, 1 в высоту)
+        # Ищем длинную горизонтальную линию (ядро 50 пикселей)
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (50, 1))
         lines = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
-        
+
         contours, _ = cv2.findContours(lines, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if not contours:
             return None
 
-        # Берем самую длинную линию
+        # Берем саму длинную линию
         best_cnt = max(contours, key=cv2.contourArea)
         lx, ly, lw, lh = cv2.boundingRect(best_cnt)
 
-        # Если линия начинается в самом начале блока — это рамка, а не дробь
+        # Защита: если линия начинается с самого левого края — это рамка, а не дробь
         if lw < 50 or lx < 20:
             return None
 
-        # РЕЖЕМ КАРТИНКУ:
-        # 1. Левая часть (весь текст до линии, включая пункты 1, 2, 3, 4)
-        left_part = block_image[:, 0:lx]
-        
-        # 2. Числитель (верхняя часть справа от линии)
-        num_part = block_image[0:ly - 2, lx:]
-        
-        # 3. Знаменатель (нижняя часть справа от линии)
-        den_part = block_image[ly + lh + 1:, lx:]
+        h, w = block_image.shape[:2]
+
+        # 1. Левая верхняя часть (1 Материал-заменитель: Лист)
+        left_part = block_image[0:ly, 0:lx]
+
+        # 2. Числитель (Б-0-ПН-8 ГОСТ...)
+        num_part = block_image[0:ly, lx:]
+
+        # 3. Знаменатель (08Х18Н10Т...). Берем строго 80 пикселей под линией.
+        den_y1 = ly + lh
+        den_y2 = min(h, den_y1 + 80)
+        den_part = block_image[den_y1:den_y2, lx:]
+
+        # 4. Нижняя часть (Пункты 2, 3, 4). Берем на полную ширину блока!
+        bottom_part = block_image[den_y2:h, 0:]
 
         def ocr(roi, psm=6):
             if roi.size == 0:
                 return ""
             gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-            # Бинаризация (черный текст на белом фоне)
             _, thresh = cv2.threshold(gray_roi, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-            # Увеличение в 2.5 раза для четкого распознавания
+            # Увеличение x2.5 для четкости
             upscaled = cv2.resize(thresh, None, fx=2.5, fy=2.5, interpolation=cv2.INTER_CUBIC)
             return pytesseract.image_to_string(upscaled, lang=self.lang, config=f'--psm {psm}').strip()
 
-        left_txt = ocr(left_part, psm=6)
+        # Распознаем куски (левая и правая части первой строки — это однострочники, PSM 7)
+        left_txt = ocr(left_part, psm=7)
         num_txt = ocr(num_part, psm=7)
         den_txt = ocr(den_part, psm=7)
+        
+        # Пункты 2,3,4 — это абзац, используем PSM 6
+        bottom_txt = ocr(bottom_part, psm=6)
 
         if not left_txt or not num_txt or not den_txt:
             return None
@@ -824,12 +833,11 @@ class OCRProcessor:
         num_txt = re.sub(r'\s+', ' ', num_txt)
         den_txt = re.sub(r'\s+', ' ', den_txt)
 
-        lines_txt = left_txt.split('\n')
-        if lines_txt:
-            # Приклеиваем дробь к первой строке (1 Материал-заменитель: Лист ...)
-            lines_txt[0] = f"{lines_txt[0]} {num_txt}/{den_txt}"
-            
-        return '\n'.join(lines_txt)
+        # Склеиваем первую строку
+        first_line = f"{left_txt} {num_txt}/{den_txt}"
+        result = f"{first_line}\n{bottom_txt}" if bottom_txt else first_line
+
+        return result
 
     def extract_text_from_block(self, image, block_bbox, debug_words=False, **kwargs):
         x, y, w, h = block_bbox
