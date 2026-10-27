@@ -1,55 +1,49 @@
-FROM registry.astralinux.ru/library/astra/ubi18-python311:latest
+# ---------- Этап 1: Сборка зависимостей ----------
+FROM registry.astralinux.ru/library/astra/ubi18-python311:latest AS builder
 
-# Добавляем репозитории AstraLinux
-RUN echo "deb https://dl.astralinux.ru/astra/stable/orel/repository orel main contrib non-free" >> /etc/apt/sources.list
-
-# Устанавливаем необходимые утилиты
-RUN apt-get update && \
-    apt-get install -y poppler-utils \
-    tesseract-ocr \ 
+# Устанавливаем только то, что нужно для сборки, без recommends
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    poppler-utils \
+    tesseract-ocr \
     tesseract-ocr-rus \
-    libgl1-mesa-glx \
+    libgl1 \
     python3-venv \
     python3-pip \
+    build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Обновляем системные pip и setuptools с флагом --break-system-packages
-RUN python3 -m pip install --upgrade --force-reinstall --break-system-packages "pip==25.3" "setuptools==80.9.0"
-
-# Удаляем системные пакеты после обновления
-RUN apt-get remove -y python3-pip python3-setuptools python3-wheel || true
-
-# Создаем пользователя
-RUN groupadd -r appuser && useradd -r -g appuser appuser
-
-# Базовая папка
 WORKDIR /app
 
-# Копируем requirements.txt ДО переключения пользователя
+# Создаём venv и ставим Python-зависимости
 COPY requirements.txt .
+RUN python3 -m venv /opt/venv && \
+    /opt/venv/bin/pip install --no-cache-dir --upgrade pip && \
+    /opt/venv/bin/pip install --no-cache-dir -r requirements.txt
 
-# Создаем виртуальное окружение и устанавливаем зависимости как ROOT
-RUN python3 -m venv venv && \
-    venv/bin/python -m ensurepip --upgrade && \
-    # Сначала обновляем pip
-    venv/bin/python -m pip install --upgrade pip && \
-    venv/bin/pip install --no-cache-dir -r requirements.txt
+# ---------- Этап 2: Минимальный рантайм ----------
+FROM registry.astralinux.ru/library/astra/ubi18-python311:latest
 
-# Копируем остальные файлы
-COPY  --chown=appuser:appuser app.py .
-COPY  --chown=appuser:appuser logger.py .
-COPY  --chown=appuser:appuser config.ini .
-#COPY sub_modules/tesstrain/data/rus/rus.lstm /usr/share/tesseract-ocr/5/tessdata
+# Ставим только рантайм-зависимости, без recommends
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    poppler-utils \
+    tesseract-ocr \
+    tesseract-ocr-rus \
+    libgl1 \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
 
-# Создаем файл лога (теперь у appuser есть права на запись)
-#RUN touch /app/logs.log && chmod 666 /app/logs.log
+# Копируем готовое виртуальное окружение из билдера
+COPY --from=builder /opt/venv /opt/venv
 
-# Меняем владельца всей директории /app на appuser
-RUN chmod -R a+rwx /app && chown -R appuser:appuser /app
+# Создаём пользователя
+RUN groupadd -r appuser && useradd -r -g appuser appuser
 
-#Переключаемся на пользователя
+WORKDIR /app
+COPY --chown=appuser:appuser *.py .
+
+# Делаем владельцем appuser
+RUN chown -R appuser:appuser /app
+
 USER appuser
-
-# Запускаем приложение
-CMD ["venv/bin/python", "main.py"]
-#CMD ["tail", "-f", "/dev/null"]
+ENV PATH="/opt/venv/bin:$PATH"
+CMD ["python", "main.py"]
