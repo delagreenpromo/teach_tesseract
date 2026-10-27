@@ -13,20 +13,9 @@ services:
     env_file:
       - ../.env
     environment:
-      - MONITORED_DIR=${CONTAINER_MONITORED_DIR:-/app/pdf}
       - UID=${UID:-1000}
       - GID=${GID:-1000}
     volumes:
-      # Файл конфигурации, доступный только для чтения
-      - type: bind
-        source: ../config.ini
-        target: /app/config.ini
-        read_only: true
-      # Каталог для мониторинга, с использованием переменной окружения
-      - type: bind
-        source: ${HOST_MONITORED_DIR:-../pdf}
-        target: ${CONTAINER_MONITORED_DIR:-/app/pdf}
-        consistency: consistent
       # Монтирование настроек времени
       - /etc/localtime:/etc/localtime:ro
       - /etc/timezone:/etc/timezone:ro
