@@ -2,7 +2,6 @@ import os
 import time
 import signal
 import sys
-from dotenv import load_dotenv
 
 from api_client import APIClient
 from logger import logger
@@ -10,7 +9,6 @@ from ocr_processor import OCRProcessor
 from pdf_processors import PdfProcessingFactory, TokenStorage
 import config_env as cfg
 
-load_dotenv()
 
 # ----------------------- Валидация -----------------------
 cfg.validate_runtime_config()

@@ -69,28 +69,27 @@ class OCRProcessor:
             os.makedirs(self.save_dir, exist_ok=True)
 
     def _detect_page_format(self, image):
-        """Определяет формат страницы по длинной стороне в мм.
-
-        DPI-нормализация: max(w, h) / dpi * 25.4 = длинная сторона в мм.
-        Диапазоны подобраны так, чтобы захватывать обрезки/рамки:
-        A4: < 350 мм   (A4 = 297 мм)
-        A3: 350–480    (A3 = 420 мм)
-        A2: 480–650    (A2 = 594 мм)
-        A1: 650–900    (A1 = 841 мм)
-        A0: >= 900     (A0 = 1189 мм)
-        """
+        """Определяет формат по КОРОТКОЙ стороне, сверяясь с ГОСТ."""
         h, w = image.shape[:2]
-        max_dim_mm = max(w, h) / self.dpi * 25.4
+        short_mm = min(w, h) / self.dpi * 25.4
+        long_mm = max(w, h) / self.dpi * 25.4
 
-        if max_dim_mm < 350:
-            return "A4"
-        if max_dim_mm < 480:
-            return "A3"
-        if max_dim_mm < 650:
-            return "A2"
-        if max_dim_mm < 900:
-            return "A1"
-        return "A0"
+        # Диапазоны подобраны так, чтобы захватывать любые удлиненные форматы (х2, х3, х4)
+        if short_mm <= 230:
+            fmt = "A4"  # 210 мм
+        elif short_mm <= 330:
+            fmt = "A3"  # 297 мм
+        elif short_mm <= 460:
+            fmt = "A2"  # 420 мм
+        elif short_mm <= 650:
+            fmt = "A1"  # 594 мм
+        else:
+            fmt = "A0"  # 841 мм
+
+        if self.debug:
+            print(f"[auto_format] {fmt}: лист {long_mm:.0f}x{short_mm:.0f} мм (короткая сторона {short_mm:.0f} мм)")
+
+        return fmt
 
     def _resolve_kernel_params(self, image):
         """Возвращает (kernel_width, kernel_height, dilation_iterations) для страницы.
@@ -184,39 +183,43 @@ class OCRProcessor:
         if area_total == 0:
             return False
 
+        # 1. Ищем линии (и горизонтальные, и вертикальные для таблиц)
         gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
         _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
+        # Горизонтальные линии
+        h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (max(30, w // 4), 1))
+        h_lines = cv2.morphologyEx(binary, cv2.MORPH_OPEN, h_kernel)
+        
+        # Вертикальные линии
+        v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, max(30, h // 4)))
+        v_lines = cv2.morphologyEx(binary, cv2.MORPH_OPEN, v_kernel)
+        
+        # Общая площадь линий
+        lines_mask = cv2.bitwise_or(h_lines, v_lines)
+        line_ratio = cv2.countNonZero(lines_mask) / area_total
+
+        # Если линий больше 3% от площади — это чертеж или таблица. Отбрасываем!
+        if line_ratio > 0.06:
+            if self.debug and block_info:
+                print(f"  Блок {block_info} отброшен как чертёж/таблица (line_ratio={line_ratio:.3f})")
+            return True
+
+        # 2. Проверка на контуры (детали чертежа)
         contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         large_contour_area = sum(cv2.contourArea(c) for c in contours if cv2.contourArea(c) > 50)
         contour_ratio = large_contour_area / area_total
-
-        min_line_len = max(30, int(min(w, h) * 0.5))
-        lines = cv2.HoughLinesP(binary, rho=1, theta=np.pi/180, threshold=30,
-                                minLineLength=min_line_len, maxLineGap=3)
-        line_mask = np.zeros_like(binary)
-        if lines is not None:
-            for line in lines:
-                x1, y1, x2, y2 = line[0]
-                length = ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
-                if length < min_line_len:
-                    continue
-                cv2.line(line_mask, (x1, y1), (x2, y2), 255, 2)
-        hough_ratio = cv2.countNonZero(line_mask) / area_total
-
-        # Если контуров/линий очень много — это точно чертёж, даже если есть текст
-        if contour_ratio > 0.4 and hough_ratio > 0.1:
+        if contour_ratio > 0.3:
             if self.debug and block_info:
-                print(f"  Блок {block_info} отброшен как чертёж (много линий)")
+                print(f"  Блок {block_info} отброшен как чертёж (contour_ratio={contour_ratio:.3f})")
             return True
 
-        # Если текста нет — тоже отбрасываем
+        # 3. Только теперь проверяем, есть ли текст
         if not self._is_real_text_block(roi):
             if self.debug and block_info:
                 print(f"  Блок {block_info} отброшен (нет текста)")
             return True
 
-        # Если текста много и линий мало — оставляем
         if self.debug and block_info:
             print(f"  Блок {block_info} оставлен как текст")
         return False
@@ -522,12 +525,108 @@ class OCRProcessor:
         except Exception:
             return False
 
+    def _group_words_to_blocks(self, data):
+        """Группирует слова в блоки по координатам, без использования cv2.dilate."""
+        words = []
+        for i in range(len(data['text'])):
+            text = data['text'][i].strip()
+            if not text:
+                continue
+            try:
+                conf = int(float(data['conf'][i]))
+            except (ValueError, TypeError):
+                continue
+            if conf < 20:  # Игнорируем только совсем мусорные слова
+                continue
+            
+            words.append({
+                'bbox': (data['left'][i], data['top'][i], data['width'][i], data['height'][i]),
+                'text': text
+            })
+            
+        if not words:
+            return []
+
+        # 1. Сортируем слова по Y (сверху вниз)
+        words.sort(key=lambda w: w['bbox'][1])
+        
+        # 2. Группируем в строки
+        lines = []
+        current_line = [words[0]]
+        for word in words[1:]:
+            wy1 = word['bbox'][1]
+            wy2 = wy1 + word['bbox'][3]
+            cy1 = current_line[0]['bbox'][1]
+            cy2 = cy1 + current_line[0]['bbox'][3]
+            
+            # Если слова пересекаются по высоте больше чем наполовину — это одна строка
+            overlap_y = max(0, min(wy2, cy2) - max(wy1, cy1))
+            min_h = min(word['bbox'][3], current_line[0]['bbox'][3])
+            
+            if min_h > 0 and overlap_y > min_h * 0.5:
+                current_line.append(word)
+            else:
+                current_line.sort(key=lambda w: w['bbox'][0]) # Сортируем по X
+                lines.append(current_line)
+                current_line = [word]
+        if current_line:
+            current_line.sort(key=lambda w: w['bbox'][0])
+            lines.append(current_line)
+            
+        # 3. Группируем строки в блоки (абзацы)
+        blocks = []
+        current_block = [lines[0]]
+        
+        for line in lines[1:]:
+            prev_line = current_block[-1]
+            
+            # Расстояние по Y между строками
+            y1 = line[0]['bbox'][1]
+            y2 = prev_line[0]['bbox'][1] + prev_line[0]['bbox'][3]
+            gap_y = max(0, y1 - y2)
+            
+            # Пересечение по X (чтобы не склеить левую и правую колонки)
+            lx1 = line[0]['bbox'][0]
+            lx2 = line[-1]['bbox'][0] + line[-1]['bbox'][2]
+            px1 = prev_line[0]['bbox'][0]
+            px2 = prev_line[-1]['bbox'][0] + prev_line[-1]['bbox'][2]
+            
+            overlap_x = max(0, min(lx2, px2) - max(lx1, px1))
+            min_w = min(lx2 - lx1, px2 - px1)
+            
+            # Склеиваем, если зазор по Y маленький (< высоты строки * 1.5)
+            # И если они находятся друг под другом (или не имеют общего X)
+            line_h = line[0]['bbox'][3]
+            if gap_y < line_h * 1.5 and (overlap_x > 0 or min_w == 0):
+                current_block.append(line)
+            else:
+                blocks.append(current_block)
+                current_block = [line]
+        if current_block:
+            blocks.append(current_block)
+            
+        # 4. Превращаем блоки строк в итоговые Bounding Boxes
+        result = []
+        for block_lines in blocks:
+            min_x = min(w['bbox'][0] for l in block_lines for w in l)
+            min_y = min(w['bbox'][1] for l in block_lines for w in l)
+            max_x = max(w['bbox'][0] + w['bbox'][2] for l in block_lines for w in l)
+            max_y = max(w['bbox'][1] + w['bbox'][3] for l in block_lines for w in l)
+            
+            result.append({
+                "bbox": (min_x, min_y, max_x - min_x, max_y - min_y),
+                "width": max_x - min_x,
+                "height": max_y - min_y,
+                "area": (max_x - min_x) * (max_y - min_y)
+            })
+            
+        return result
+
     def detect_text_blocks(self, image):
         img_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         binary = self.preprocess_image(img_rgb)
 
-        data = pytesseract.image_to_data(img_rgb, lang=self.lang, output_type=Output.DICT,
-                                         config='--psm 11')
+        data = pytesseract.image_to_data(img_rgb, lang=self.lang, output_type=Output.DICT, config='--psm 11')
 
         mask = np.zeros_like(binary)
         for i in range(len(data["level"])):
@@ -544,21 +643,29 @@ class OCRProcessor:
             return []
 
         min_area = image.shape[0] * image.shape[1] * self.min_area_ratio
-        logger.debug(f"min_area = {min_area:.0f} (изображение {image.shape[1]}x{image.shape[0]})")
         text_blocks = []
+        
+        # Размеры листа
+        img_h, img_w = image.shape[:2]
+
         for idx, contour in enumerate(contours):
             area = cv2.contourArea(contour)
             x, y, w, h = cv2.boundingRect(contour)
+            
             if area < min_area:
-                logger.debug(f"  Блок #{idx} ({w}x{h}) отброшен: площадь {area:.0f} < {min_area:.0f}")
-                continue
-            roi = image[y:y+h, x:x+w]
-            if self.use_advanced and self.is_likely_drawing(roi, block_info=f"#{idx} ({w}x{h})"):
                 continue
 
-            if self._is_stamp_roi(roi):
+            # --- УБИЙЦА ГИГАНТСКИХ БЛОКОВ ---
+            # Если блок занимает больше n% ширины или высоты листа, это чертеж.
+            if w > img_w * 0.8 or h > img_h * 0.99:
                 if self.debug:
-                    print(f"  Блок #{idx} отброшен как ЭЦП/штамп")
+                    print(f"  Блок #{idx} ({w}x{h}) отброшен: слишком большой (похож на чертеж/таблицу)")
+                continue
+
+            roi = image[y:y+h, x:x+w]
+            
+            # Убрали проверку _is_stamp_roi (ЭЦП). Теперь она не будет убивать ТТ.
+            if self.use_advanced and self.is_likely_drawing(roi, block_info=f"#{idx} ({w}x{h})"):
                 continue
 
             text_blocks.append({
@@ -568,6 +675,7 @@ class OCRProcessor:
                 "height": h,
                 "aspect_ratio": w / h if h > 0 else 1,
             })
+            
         if self.debug:
             print(f"Найдено {len(text_blocks)} текстовых блоков из {len(contours)} контуров")
         return text_blocks
@@ -793,6 +901,9 @@ class OCRProcessor:
             return None
 
         h, w = block_image.shape[:2]
+        # Если блок слишком большой, это точно не дробь, а таблица или чертеж
+        if h > 600 or w > 1500:
+            return None
 
         # !!! ГЛАВНЫЙ ФИКС С ОБРЕЗКОЙ !!!
         # Берем полосу высотой +-40 пикселей от линии, чтобы не захватить чертеж сверху
