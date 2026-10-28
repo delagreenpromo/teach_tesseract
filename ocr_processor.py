@@ -1149,7 +1149,11 @@ class OCRProcessor:
                     continue
 
                 page_text.append(cleaned)
-                all_blocks.append(cleaned)
+                # Сохраняем и текст, и координаты для админки
+                all_blocks.append({
+                    "text": cleaned,
+                    "bbox": block_info['bbox'] 
+                })
 
             if page_text:
                 full_text.append('\n'.join(page_text))

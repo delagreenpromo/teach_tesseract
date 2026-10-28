@@ -226,13 +226,41 @@ class OCRPdfProcessor(BasePdfProcessor):
                 source_name or 'без имени',
             )
 
+        # 1. Получаем реальные размеры листа для админки
+        orig_w, orig_h = 1000, 1000
+        if fitz is not None:
+            try:
+                with fitz.open(stream=pdf_bytes, filetype='pdf') as doc:
+                    if len(doc) > 0:
+                        page = doc[0]
+                        orig_w, orig_h = page.rect.width, page.rect.height
+            except Exception:
+                pass
+
+        # 2. Масштабируем координаты (из пикселей 300 DPI в PDF-поинты 72 DPI)
+        dpi = getattr(self.ocr_engine, 'dpi', 300)
+        scale = 72.0 / dpi
+        
+        processed_blocks = []
+        for b in blocks:
+            if isinstance(b, dict) and "bbox" in b:
+                x, y, w, h = b["bbox"]
+                # Умножаем на scale, чтобы координаты стали PDF-поинтами
+                scaled_bbox = (int(x * scale), int(y * scale), int(w * scale), int(h * scale))
+                processed_blocks.append({
+                    "text": b.get("text", ""),
+                    "bbox": scaled_bbox,
+                    "source": source_name
+                })
+            else:
+                processed_blocks.append({"text": str(b), "bbox": (0,0,0,0), "source": source_name})
+
         return {
             "text": text or "",
-            "blocks": [{"text": b, "source": source_name} for b in blocks],
-            "blocks_data": {
-                f"block_{i + 1}": {"text": b, "source": source_name}
-                for i, b in enumerate(blocks)
-            },
+            "original_width": orig_w,
+            "original_height": orig_h,
+            "blocks": processed_blocks,
+            "blocks_data": {f"block_{i + 1}": b for i, b in enumerate(processed_blocks)},
         }
 
 
@@ -388,13 +416,22 @@ class TextLayerPdfProcessor(BasePdfProcessor):
 
         logger.info(f"TextLayerPdfProcessor: обработка файла {source_name or 'без имени'}")
         doc = fitz.open(stream=pdf_bytes, filetype='pdf')
-        blocks = []
+        
+        all_blocks = []
         seen = set()
+        orig_w, orig_h = 1000, 1000
 
         try:
-            for page in doc:
+            for page_idx, page in enumerate(doc):
+                # Запоминаем размеры первой страницы
+                if page_idx == 0:
+                    orig_w, orig_h = page.rect.width, page.rect.height
+
                 for block in page.get_text('blocks'):
+                    # block = (x0, y0, x1, y1, text, block_no, block_type)
+                    x0, y0, x1, y1 = block[0], block[1], block[2], block[3]
                     text = self._normalize_block_text(block[4])
+                    
                     if not text:
                         continue
                     cleaned_block = self._filter_requirement_lines(text)
@@ -404,20 +441,35 @@ class TextLayerPdfProcessor(BasePdfProcessor):
                     normalized_block = re.sub(r"\n{3,}", "\n\n", normalized_block).strip()
                     if not normalized_block:
                         continue
+                        
                     block_key = normalized_block.lower()
                     if block_key in seen:
                         continue
                     seen.add(block_key)
-                    blocks.append(normalized_block)
+                    
+                    # Считаем ширину и высоту для админки
+                    w = x1 - x0
+                    h = y1 - y0
+                    
+                    all_blocks.append({
+                        "text": normalized_block,
+                        "bbox": (int(x0), int(y0), int(w), int(h)),
+                        "source": source_name
+                    })
+                    
                     self._store_block_text(normalized_block, source_name)
         finally:
             doc.close()
 
-        full_text = "\n\n".join(blocks)
+        # Собираем общий текст
+        full_text = "\n\n".join([b["text"] for b in all_blocks])
+        
         return {
             'text': full_text,
-            'blocks': blocks,
-            'blocks_data': {f'block_{idx + 1}': {'text': block, 'source': source_name} for idx, block in enumerate(blocks)},
+            'original_width': orig_w,
+            'original_height': orig_h,
+            'blocks': all_blocks,
+            'blocks_data': {f'block_{idx + 1}': b for idx, b in enumerate(all_blocks)},
         }
 
 
