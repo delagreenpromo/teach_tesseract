@@ -56,7 +56,7 @@ def get_unique_token_stats(db_path=None):
     return stats
 
 
-def build_requirement_preview_html(preview_data_url: str | None = None, blocks: list | None = None) -> str:
+def build_requirement_preview_html(preview_data_url: str | None = None, blocks: list | None = None, original_width: int = 1000, original_height: int = 1000) -> str:
     blocks = blocks or []
     preview_data_url = preview_data_url or ""
 
@@ -69,22 +69,30 @@ def build_requirement_preview_html(preview_data_url: str | None = None, blocks: 
         )
 
     overlay_boxes = []
-    for idx, block in enumerate(blocks[:12]):
+    for idx, block in enumerate(blocks):
         if isinstance(block, dict):
-            value = str(block.get("text") or "").strip()
+            bbox = block.get("bbox")
         else:
-            value = str(block or "").strip()
-        label = escape(value[:60]) if value else f"Блок {idx + 1}"
-        left = 35
-        top = 60 + idx * 58
-        width = 68
-        height = 34
+            bbox = None
+
+        if not bbox or len(bbox) != 4:
+            continue
+
+        x, y, w, h = bbox
+        # Переводим пиксели в проценты
+        left_pct = (x / original_width) * 100
+        top_pct = (y / original_height) * 100
+        width_pct = (w / original_width) * 100
+        height_pct = (h / original_height) * 100
+
+        # ЗДЕСЬ БЫЛА ОШИБКА: добавлен закрывающий тег </div>
         overlay_boxes.append(
-            f'<div class="requirement-box" style="left:{left}%; top:{top}px; width:{width}%; height:{height}px;">'
-            f'<span class="requirement-label">{label}</span></div>'
+            f'<div class="requirement-box" style="left:{left_pct}%; top:{top_pct}%; width:{width_pct}%; height:{height_pct}%;"></div>'
         )
 
     overlay_html = "".join(overlay_boxes)
+    
+    # ЗДЕСЬ БЫЛА ОШИБКА: убрано дублирование <div id="fullscreen-preview">
     return f'''
         <div class="card preview-card">
             <div class="preview-header">
@@ -102,9 +110,11 @@ def build_requirement_preview_html(preview_data_url: str | None = None, blocks: 
                     <h3>Полный просмотр чертежа</h3>
                     <button type="button" class="preview-button" onclick="toggleFullscreenPreview()">Закрыть</button>
                 </div>
-                <div class="thumbnail-shell fullscreen-shell">
-                    <img class="fullscreen-image" src="{preview_data_url}" alt="Full preview of the drawing">
-                    {overlay_html}
+                <div class="fullscreen-scroll-area">
+                    <div class="fullscreen-shell" id="zoom-shell" onclick="this.classList.toggle('zoomed')">
+                        <img class="fullscreen-image" src="{preview_data_url}" alt="Full preview of the drawing">
+                        {overlay_html}
+                    </div>
                 </div>
             </div>
         </div>
@@ -114,6 +124,9 @@ def build_requirement_preview_html(preview_data_url: str | None = None, blocks: 
                 if (!modal) return;
                 modal.classList.toggle('visible');
                 modal.setAttribute('aria-hidden', String(!modal.classList.contains('visible')));
+                if (!modal.classList.contains('visible')) {{
+                    document.getElementById('zoom-shell').classList.remove('zoomed');
+                }}
             }}
         </script>
     '''
@@ -127,25 +140,13 @@ def render_pdf_preview(pdf_bytes: bytes, blocks: list | None = None) -> str:
             if not doc or len(doc) == 0:
                 return ""
             page = doc[0]
-            matrix = fitz.Matrix(0.6, 0.6)
+            # Увеличиваем качество картинки (2.0 вместо 0.6), чтобы при приближении не было пикселей
+            zoom = 2.0
+            matrix = fitz.Matrix(zoom, zoom)
             pix = page.get_pixmap(matrix=matrix, alpha=False)
-            width = max(1, int(page.rect.width * 0.6))
-            height = max(1, int(page.rect.height * 0.6))
-            for idx, block in enumerate((blocks or [])[:12]):
-                if isinstance(block, dict):
-                    text_value = block.get("text")
-                else:
-                    text_value = block
-                if not str(text_value or "").strip():
-                    continue
-                x0 = 35
-                y0 = 55 + idx * 58
-                x1 = max(width - 30, x0 + 280)
-                y1 = min(height - 30, y0 + 42)
-                try:
-                    pix.draw_rect(fitz.Rect(x0, y0, x1, y1), color=(1, 0, 0), fill=None, overlay=True)
-                except Exception:
-                    pass
+            
+            # БОЛЬШЕ НЕ РИСУЕМ РАМКИ ЧЕРЕЗ FITZ (это делают CSS-стили)
+            
             encoded = base64.b64encode(pix.tobytes("png")).decode("ascii")
             return f"data:image/png;base64,{encoded}"
     except Exception:
@@ -314,6 +315,8 @@ def render_test_page(result: dict | None = None, error_message: str | None = Non
         preview_html = build_requirement_preview_html(
             preview_data_url=result.get("preview_data_url"),
             blocks=_preview_blocks(result),
+            original_width=result.get("original_width", 1000),
+            original_height=result.get("original_height", 1000),
         )
         result_html = f"""
             <div class="card">
@@ -345,14 +348,46 @@ def render_test_page(result: dict | None = None, error_message: str | None = Non
                 .preview-header {{ display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }}
                 .thumbnail-shell {{ position: relative; display: inline-block; max-width: 100%; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; background: #f8fafc; }}
                 .thumbnail-preview {{ display: block; max-width: 100%; height: auto; background: #fff; min-height: 240px; }}
-                .requirement-box {{ position: absolute; border: 3px solid rgba(239, 68, 68, 0.95); background: rgba(239, 68, 68, 0.08); border-radius: 10px; box-shadow: 0 0 0 1px rgba(239, 68, 68, 0.3); pointer-events: none; }}
-                .requirement-label {{ position: absolute; left: 8px; top: 6px; background: rgba(239, 68, 68, 0.9); color: white; border-radius: 999px; padding: 4px 8px; font-size: 11px; white-space: nowrap; }}
+                /* Тонкие рамки без фона */
+                /* Стиль полицейской ленты для блоков */
+                .requirement-box {{
+                    position: absolute;
+                    border: 3px solid transparent;
+                    border-radius: 4px;
+                    /* Красно-белые диагональные полосы */
+                    background: repeating-linear-gradient(
+                        -45deg,
+                        #ef4444,
+                        #ef4444 2px,
+                        #ffffff 2px,
+                        #ffffff 4px
+                    ) border-box;
+                    /* Магия CSS: скрываем заливку внутри, оставляя только рамку */
+                    -webkit-mask: linear-gradient(#fff 0 0) padding-box, linear-gradient(#fff 0 0);
+                    mask: linear-gradient(#fff 0 0) padding-box, linear-gradient(#fff 0 0);
+                    -webkit-mask-composite: xor;
+                    mask-composite: exclude;
+                    /* Легкая тень, чтобы лента читалась на любом фоне */
+                    filter: drop-shadow(0px 0px 3px rgba(0, 0, 0, 0.5));
+                    pointer-events: none;
+                }}
+                
                 .preview-button {{ padding: 9px 14px; border: none; border-radius: 10px; background: #0f172a; color: white; cursor: pointer; }}
+                
+                /* Модальное окно */
                 .fullscreen-preview {{ position: fixed; inset: 0; display: none; background: rgba(15, 23, 42, 0.8); padding: 24px; z-index: 1000; }}
                 .fullscreen-preview.visible {{ display: flex; justify-content: center; align-items: center; }}
-                .fullscreen-panel {{ position: relative; max-width: 90vw; max-height: 90vh; overflow: auto; background: white; border-radius: 16px; padding: 18px; box-shadow: 0 30px 60px rgba(0,0,0,0.35); }}
-                .fullscreen-image {{ max-width: 90vw; max-height: 75vh; display: block; border-radius: 12px; border: 1px solid #e2e8f0; }}
-                .modal-header {{ margin-bottom: 12px; }}
+                
+                /* Панель внутри модалки с ползунками */
+                .fullscreen-panel {{ position: relative; max-width: 95vw; width: 95vw; max-height: 95vh; height: 95vh; display: flex; flex-direction: column; overflow: hidden; background: white; border-radius: 16px; padding: 18px; box-shadow: 0 30px 60px rgba(0,0,0,0.35); }}
+                
+                /* Область прокрутки */
+                .fullscreen-scroll-area {{ flex-grow: 1; overflow: auto; background: #f8fafc; border-radius: 12px; border: 1px solid #e2e8f0; }}
+                
+                /* Контейнер, который будет увеличиваться */
+                .fullscreen-shell {{ position: relative; display: inline-block; transform-origin: top left; transition: transform 0.2s; margin: 20px; cursor: zoom-in; }}
+                .fullscreen-shell.zoomed {{ transform: scale(2.5); cursor: zoom-out; margin: 50px; }}
+                .fullscreen-image {{ display: block; max-width: 100%; height: auto; }}
             </style>
         </head>
         <body>
