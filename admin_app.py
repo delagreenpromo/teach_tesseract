@@ -79,6 +79,13 @@ def build_requirement_preview_html(preview_data_url: str | None = None, blocks: 
             continue
 
         x, y, w, h = bbox
+
+        pad_px = 6  # чем больше число, тем шире рамка
+        
+        x = max(0, x - pad_px)
+        y = max(0, y - pad_px)
+        w = w + (pad_px * 2)
+        h = h + (pad_px * 2)
         # Переводим пиксели в проценты
         left_pct = (x / original_width) * 100
         top_pct = (y / original_height) * 100
@@ -97,13 +104,19 @@ def build_requirement_preview_html(preview_data_url: str | None = None, blocks: 
         <div class="card preview-card">
             <div class="preview-header">
                 <h3>Миниатюра чертежа</h3>
-                <button type="button" class="preview-button" onclick="toggleFullscreenPreview()">Открыть в полный экран</button>
+                <div>
+                    <button type="button" class="preview-button" id="toggle-boxes-btn" onclick="toggleBoxes()" style="margin-right: 10px; background: #475569;">Скрыть рамки</button>
+                    <button type="button" class="preview-button" onclick="toggleFullscreenPreview()">Открыть в полный экран</button>
+                </div>
             </div>
+            
+            <!-- ВОТ ЭТОТ БЛОК ТЫ СЛУЧАЙНО УДАЛИЛ (картинка и рамки) -->
             <div class="thumbnail-shell">
                 <img class="thumbnail-preview" src="{preview_data_url}" alt="Preview of the drawing">
                 {overlay_html}
             </div>
         </div>
+        
         <div id="fullscreen-preview" class="fullscreen-preview" aria-hidden="true">
             <div class="fullscreen-panel">
                 <div class="preview-header modal-header">
@@ -118,12 +131,24 @@ def build_requirement_preview_html(preview_data_url: str | None = None, blocks: 
                 </div>
             </div>
         </div>
+        
         <script>
+            // НОВАЯ ФУНКЦИЯ: Скрыть/Показать рамки
+            function toggleBoxes() {{
+                const isHidden = document.body.classList.toggle('hide-boxes');
+                const btn = document.getElementById('toggle-boxes-btn');
+                if (btn) {{
+                    btn.textContent = isHidden ? 'Показать рамки' : 'Скрыть рамки';
+                }}
+            }}
+
             function toggleFullscreenPreview() {{
                 const modal = document.getElementById('fullscreen-preview');
                 if (!modal) return;
                 modal.classList.toggle('visible');
                 modal.setAttribute('aria-hidden', String(!modal.classList.contains('visible')));
+                
+                // При закрытии сбрасываем зум
                 if (!modal.classList.contains('visible')) {{
                     document.getElementById('zoom-shell').classList.remove('zoomed');
                 }}
@@ -372,6 +397,11 @@ def render_test_page(result: dict | None = None, error_message: str | None = Non
                     pointer-events: none;
                 }}
                 
+                /* Скрываем все рамки, если на body есть класс hide-boxes */
+                body.hide-boxes .requirement-box {{
+                    display: none !important;
+                }}
+
                 .preview-button {{ padding: 9px 14px; border: none; border-radius: 10px; background: #0f172a; color: white; cursor: pointer; }}
                 
                 /* Модальное окно */
