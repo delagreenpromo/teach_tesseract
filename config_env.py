@@ -50,6 +50,12 @@ API_POLLING_INTERVAL = env("API_POLLING_INTERVAL", 60, int)
 # ============================================================
 # Paths
 # ============================================================
+SSL_TLS = env("SSL_TLS", True, bool)
+CERT = env("CERT", None, str)
+
+# ============================================================
+# Paths
+# ============================================================
 RESULTS_DIR = env("RESULTS_DIR", "./results")
 TOKEN_DB_PATH = env("TOKEN_DB_PATH", os.path.join(RESULTS_DIR, "unique_tokens.db"))
 
@@ -64,7 +70,7 @@ MAX_FILES_PER_CYCLE = env("MAX_FILES_PER_CYCLE", 0, int)
 ALLOWED_FILE_TYPES = env("ALLOWED_FILE_TYPES", "", list)
 
 LOG_LEVEL = env("LOG_LEVEL", "INFO", str)
-LOG_FILE = env("LOG_FILE", "logs.log", str)
+LOG_FILE = env("LOG_FILE", "/dev/null", str)
 # LOG_MODE: console | file | both | none
 LOG_MODE = env("LOG_MODE", "both", str)
 
@@ -92,7 +98,7 @@ EXCLUDE_KEYWORDS = env("EXCLUDE_KEYWORDS", "", list)
 # Admin panel
 # ============================================================
 ADMIN_LOGIN = env("ADMIN_LOGIN", "admin")
-ADMIN_PASSWORD = env("ADMIN_PASSWORD", "admin123")
+ADMIN_PASSWORD = env("ADMIN_PASSWORD", "admin")
 ADMIN_PORT = env("ADMIN_PORT", 5002, int)
 ADMIN_SECRET_KEY = env("ADMIN_SECRET_KEY", "teach-tesseract-admin-secret")
 

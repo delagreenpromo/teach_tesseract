@@ -5,7 +5,7 @@ services:
     build:
       context: ../../
       dockerfile: docker/astralinux/Dockerfile
-    container_name: astralinux_ocr_app
+    container_name: astralinux-ocr_app
     mem_limit: 2g
     user: "${UID}:${GID}"
     working_dir: /app
@@ -15,6 +15,7 @@ services:
       - UID=${UID:-1000}
       - GID=${GID:-1000}
     volumes:
+      - ./results:/app/results:rw
       # Монтирование настроек времени
       - /etc/localtime:/etc/localtime:ro
       - /etc/timezone:/etc/timezone:ro

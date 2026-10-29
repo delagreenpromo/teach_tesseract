@@ -78,6 +78,8 @@ client = APIClient(
     last_attribute_id=cfg.API_LAST_ATTRIBUTE_ID,
     debug=cfg.DEBUG,
     is_production=cfg.IS_PRODUCTION,
+    ssl_tls=cfg.SSL_TLS,
+    cert=cfg.CERT,
 )
 
 

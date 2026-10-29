@@ -11,9 +11,11 @@ class APIClient:
                 password, 
                 ocr_processor=None, 
                 first_attribute_id=30357, 
-                last_attribute_id=30356, 
-                debug: bool = False, 
-                is_production: bool = True):
+                last_attribute_id=30356,
+                ssl_tls:bool=True,
+                cert:str=None, 
+                debug:bool=False, 
+                is_production:bool=True):
         self.username = username
         self.password = password
         self.token = None
@@ -22,6 +24,8 @@ class APIClient:
         self.first_attribute_id = first_attribute_id
         self.last_attribute_id = last_attribute_id
         self.session = requests.Session()
+        self.session.verify = ssl_tls
+        self.session.cert = cert
         self.ocr = ocr_processor
         self.debug = debug
         self.is_production = is_production
